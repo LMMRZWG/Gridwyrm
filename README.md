@@ -11,7 +11,7 @@ has one that doesn't match your tokens.
 
 ## Download
 
-**[Download Gridwyrm.exe]([https://github.com/LMMRZWG/Gridwyrm/releases/latest/download/Gridwyrm.exe](https://github.com/LMMRZWG/Gridwyrm/releases/latest/download/Gridwyrm.exe))**
+**[Download Gridwyrm.exe](https://github.com/LMMRZWG/Gridwyrm/releases/latest/download/Gridwyrm.exe)**
 
 No installer, no dependencies, nothing to set up. One file: put it wherever you
 like and run it.
@@ -26,7 +26,7 @@ hundred pounds a year and this is free software.
 Click **More info**, then **Run anyway**.
 
 Your antivirus may also flag it. Gridwyrm registers global hotkeys, writes a
-registry key if you enable autostart, and draws a transparent always-on-top
+startup entry if you switch that on, and draws a transparent always-on-top
 window. That is behaviour heuristics dislike, and it is also exactly what the
 program is for. The source is right here if you would rather read it and build
 your own copy.
@@ -62,7 +62,8 @@ useful.
 
 1. **Pick the screen** the map is on, under `SCREEN`.
 2. **Set the cell size** to roughly match one square on the map. Drag the
-   slider, then use `−` / `+` or the `[` and `]` keys for half-pixel steps.
+   slider, then use the minus and plus buttons, or the `[` and `]` keys, for
+   half-pixel steps.
 3. **Nudge the offset** with the arrow keys until the lines sit on the map's own
    grid. Hold Shift for ten-pixel jumps.
 
@@ -71,7 +72,7 @@ Once it lines up, it stays lined up. The settings are saved when you close.
 ## Hotkeys
 
 Global, so they work while the map has focus. All are editable under
-**Settings → Hotkeys**.
+**Settings > Hotkeys**.
 
 | Action | Default |
 | --- | --- |
@@ -85,8 +86,8 @@ Three modifiers, deliberately. A global hotkey is claimed from every running
 program, so the defaults stay clear of combinations other software wants.
 `Ctrl+Alt+G`, for instance, belongs to Google Drive.
 
-While the control panel itself has focus, the arrow keys, `+` / `−`, `[` / `]`
-and `H` work on their own.
+While the control panel itself has focus, the arrow keys, plus and minus,
+`[` and `]`, and `H` all work on their own.
 
 ## Where things are kept
 
@@ -99,15 +100,22 @@ and `H` work on their own.
 | `errors.log` | Python exceptions, if any occur |
 | `crash.log` | native faults, if any occur |
 
-Deleting `settings.json` resets Gridwyrm to defaults. Uninstalling is deleting
-the `.exe` and that folder. Turn off **Start with Windows** first if you enabled
-it, or remove the `Gridwyrm` value from
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+Deleting `settings.json` resets Gridwyrm to defaults.
+
+To remove Gridwyrm completely: turn off **Start with Windows** in Settings if
+you switched it on, then delete the `.exe` and that folder.
 
 ## Running from source
 
+Two files, holding identical code:
+
+| File | Use it for |
+| --- | --- |
+| `gridwyrm.pyw` | normal use. Double-click it. Windows runs `.pyw` files with `pythonw.exe`, so no console window appears. |
+| `gridwyrm.py` | when something misbehaves. The console stays open and errors appear there as they happen, as well as in the log files. |
+
 ```
-python gridwyrm.pyw
+python gridwyrm.py
 ```
 
 Python 3.8 or newer with tkinter, which the standard python.org installer
@@ -117,18 +125,39 @@ includes. No other packages are required.
 installed, preview images are resized more smoothly and JPEG works as well as
 PNG and GIF. Gridwyrm never requires it.
 
+The two files are deliberately identical rather than one importing the other.
+Windows treats `.pyw` as an importable source extension, so a launcher that did
+`import gridwyrm` could end up importing itself, and a `.pyw` has nowhere to
+print the resulting error. Keeping full copies is duller and it works. **If you
+change one, copy it over the other**, and the tests will tell you if you forget.
+
+### Tests
+
+```
+python -m unittest -v
+```
+
+Thirty-five tests covering the grid geometry, colour conversion, theme
+resolution, the settings file, the hotkey defaults, and whether the two source
+files still match. They also run automatically before every release build, so a
+failing test stops a broken version being published.
+
 ### Building the .exe
 
-Run `build_exe.bat` on a Windows machine that has Python. It installs
-PyInstaller if needed and produces `dist\Gridwyrm.exe`.
+Builds are automatic. Publishing a release, or pushing a tag such as `v1.1`,
+makes GitHub build `Gridwyrm.exe` on a Windows machine and attach it to that
+release. Nothing needs building by hand.
+
+To build locally anyway, run `build_exe.bat` on a Windows machine that has
+Python. It installs PyInstaller if needed and produces `dist\Gridwyrm.exe`.
 
 ## Notes
 
 - **No telemetry, no network access.** Gridwyrm never connects to anything. The
   only files it writes are the ones listed above.
-- **No bundled artwork.** The sample map in the preview is drawn in code. If you
-  want to preview against a real map, point it at your own file. It is read from
-  disk and goes nowhere.
+- **No bundled artwork.** The sample map in the preview is drawn in code, and
+  the icon is embedded in the source. If you want to preview against a real map,
+  point it at your own file. It is read from disk and goes nowhere.
 
 ## Licence
 
