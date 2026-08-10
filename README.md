@@ -11,7 +11,7 @@ has one that doesn't match your tokens.
 
 ## Download
 
-**[Download Gridwyrm.exe](https://github.com/LMMRZWG/Gridwyrm/releases/latest/download/Gridwyrm.exe)**
+**[Download Gridwyrm.exe]([https://github.com/LMMRZWG/Gridwyrm/releases/latest/download/Gridwyrm.exe](https://github.com/LMMRZWG/Gridwyrm/releases/latest/download/Gridwyrm.exe))**
 
 No installer, no dependencies, nothing to set up. One file: put it wherever you
 like and run it.
