@@ -42,7 +42,7 @@ jobs:
       - name: Build Gridwyrm.exe
         run: >
           pyinstaller --onefile --windowed --noupx --clean --noconfirm
-          --name Gridwyrm --icon icon.ico gridwyrm.py
+          --name Gridwyrm --icon icon.ico gridwyrm.pyw
 
       - name: Keep the exe even without a tag
         uses: actions/upload-artifact@v4
