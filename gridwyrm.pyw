@@ -6,9 +6,15 @@ Pick a screen, and a square or hex grid is drawn over everything on it. A
 control panel on your other screen tunes cell size, offset, colour, line weight
 and opacity live, so you can line the grid up against a map.
 
-Run gridwyrm.pyw to start it with no console window. Run this file directly
-(gridwyrm.py) and the console stays open, which is what you want when something
-misbehaves - errors appear there as well as in the log files.
+Double-click this file to run it. The .pyw extension makes Windows use
+pythonw.exe, so no console window appears.
+
+To watch for errors instead, run it from a terminal you already have open:
+
+    python gridwyrm.pyw
+
+The console stays in that case, because it belongs to the terminal rather than
+to Gridwyrm, and errors print there as well as to the log files.
 
 Stdlib only: Python 3.8+ with tkinter.
   Windows 10/11 - invisible background, real click-through, dark window frame.
@@ -18,13 +24,16 @@ Stdlib only: Python 3.8+ with tkinter.
 Settings, and three log files, live in the Gridwyrm folder inside %APPDATA%.
 """
 
+import base64
 import colorsys
 import faulthandler
 import json
 import math
 import os
 import re
+import struct
 import sys
+import tempfile
 import time
 import traceback
 import tkinter as tk
@@ -43,6 +52,13 @@ IS_WINDOWS = sys.platform.startswith("win")
 
 # Rendered fully see-through, and click-through, on Windows.
 KEY_COLOR = "#0b0c0d"
+
+# Used while measuring, when the overlay has to catch the mouse. See
+# Overlay.set_measure_surface for why the background cannot stay invisible.
+SHIFT_HELD = 0x0001                          # the Shift bit in a Tk event state
+MIN_REVEAL_MS = 700                          # a tapped reveal still has to be seen
+MEASURE_WASH = "#0B0F16"
+MEASURE_ALPHA = 0.42
 
 # --- themes ---------------------------------------------------------------
 # A theme is seven colour roles, ordered darkest surface to brightest text
@@ -435,26 +451,332 @@ ICON_PNG_16 = """\
 """
 
 
+# The same mark again, this time as a complete .ico with classic BMP entries.
+#
+# Two icons are embedded because two mechanisms need feeding and they accept
+# different things. The title bar takes images from memory through iconphoto,
+# which is happy with PNG. The taskbar button needs iconbitmap, and Tk reads
+# that file itself rather than handing it to Windows - its reader only
+# understands classic DIB entries, so a modern PNG-compressed .ico is loaded
+# without complaint and silently ignored. Hence a second, DIB-format copy at
+# three sizes, which costs about twenty kilobytes.
+
+ICON_ICO = """\
+    AAABAAMAEBAAAAEAIABoBAAANgAAACAgAAABACAAqBAAAJ4EAAAwMAAAAQAgAKglAABGFQAA
+    KAAAABAAAAAgAAAAAQAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABIMBioMBwJoDAcFZhMM
+    CWcTDAlnEQwHZxEJB2cOCQdnEQkHZxEMB2cOCQdnEQkHZxMMCWcPCgdmCQQCaBQNBiYLBwJs
+    EgsG/xYOCP8VDQf/EgsG/xMLB/8UDAj/Fw4K/xQMB/8TCwf/Fg4K/xUNCf8TDAb/FQ0H/xQM
+    B/8NBwJhEQoHZhgPCPwRCgL5DQcC/BEKBvwbEgv8EwsF/BUMBvwLBQH8GBAK/CMZEfwXDwn8
+    EAkC/BEJA/oWDgj8GBALXBgRDGcYDwf/DQYB/B8VDv8fFQz/KR4S/xoRCf8YDwj/IhkT/zEm
+    Hv8iGhT/EgoD/xQMBf8SCwT9FQ0G/x4VEF0bEw5nFw4H/xEJBfwlHBP/GBAI/x4VDf8SDAf/
+    Migf/zwyKP8jGxX/EAkE/w8IAf8TCwX/EgoE/RUNBv8eGBBdHRYOZxgPB/8WDgj8LyQY/yUc
+    Ef8mGxD/PjMp/0A2Lv8YEAv/DwcB/w8IA/8SCwj/DQYB/xEKA/0XDgf/IxgTXR0WEWcZEAn/
+    GBEJ/CQbEf8aEwr/IhgP/1BEOv8dFhH/CwQA/wsFAf8NCAX/LCMd/xoTEP8OCAL9Fw4H/yYY
+    E10gGBFnGxEJ/x0UDPwzKBv/JBsR/zMnHf9DNy7/FRAM/wQAAP8QCgf/LiYg/0Q6NP9hVk7/
+    Jh4Y/RMKA/8pHhVdIhsTZxsSCf8dFQ/8LiQZ/xwTCv8yJhr/KyEa/yQdGf8+NjH/V05G/1lO
+    Rv9xZl//X1hR/yYfGf0VDAP/KyAYXSUbFmcfFQz/GxIL/EY7MP8mHBH/IxkN/zEpJP9DOzX/
+    b2dg/2NZT/9xZ1z/WlJM/xEHAP8XDgf9HBMK/ysjGF0nHRZnIxgQ/xYMBPwcFA7/LCQe/x0W
+    E/88NzT/XVVP/3RsZf99dnD/eXNt/y0kHf8YDQb/GhAJ/R4UDP8uJh5dJyAYZyUbEf8dEgn8
+    GhAI/xgRDf8+NzL/U0xI/0xFQP9pYlz/WFJM/yYcFf8XDAL/JRgO/xsRCf0hFg3/MSkeXSwi
+    G2cpHRL/IRYL/BkQCP8xKyj/U0xH/zMtKf9fWFL/Qjky/xYLA/8fEwr/IRYN/yIVDP8dEgr9
+    IhcO/zkrI10bFhFmMyYb/CIWCfkoHRT8OTAn/CUdFvxCOTH8KiAX/B0SB/whFQr8IRUL/CIV
+    CvwjFwv8HhII+i0gFvwvJB5cCQQCbCIZEv80KB3/MCQY/yseEv80KB3/LSEW/ywgFf8wJBn/
+    LyMZ/zAjGf8wJBn/LyMY/zElG/8nHhb/DQcFYRIMBioJBABoGRQPZicgG2cqIhtnJR0WZycg
+    G2cnIBtnJx0YZyUdGGclHRhnJR0YZycgGGceGRRmDAQAaBQNBiYAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKAAAACAA
+    AABAAAAAAQAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAA8JA4gQCQS7CwUBuAYEAboPCAW6EQwIuhMMCboRDAm6EQoJuhEKCLoUCgm6EQwIuhMM
+    CboQDAi6EwoIuhAKCLoRCgi6EwoJuhEMCLoTCgm6EQwIuhEMCLoTCgm6EAwIuhMKCLoPCga6
+    CgQCugYEALcQCQS7EAoEewAAAAAAAAAAEAoDxQwHAv8NBwT/GRIM/xwRDP8YEQn/GRAK/xcQ
+    Cf8ZDwr/Fg8I/xcMCP8RDAf/FQsJ/xMOCf8WDAn/FQ0J/xQNCf8VDAr/EgwI/xUMCf8TDAn/
+    EwwJ/xcNCf8XEAj/GQ4J/xcRCf8cEQz/EQoH/w0HAv8RCgSyAAAAAAAAAAANCAK4DggF/B4S
+    DfkTDAT8EQkD/A8JAvwPCAP8DgkC/AwEAfwJBQH8EAgF/BEMB/wVCwj8FxAJ/BwQC/wRCwb8
+    EwwG/A8IBPwTDQn8GBAL/BYOCvwYEQr8EwoH/A4IAfwQCQP8DwgC/BAJA/wcEg34FA4J/AwE
+    AaYAAAAAAAAAAAoFAbocEg3/FQwF/BAKAv8TCgT/EQoD/xEJBP8KBgH/EgoI/xoSDP8oGhL/
+    EQsE/xIJBP8VDQb/GA0H/wwHAf8MBQH/CwUD/yAVD/8cFA3/HRIN/x4WD/8SCgX/EgoD/xEK
+    A/8SCQT/EQsD/xEIBPsbFQ3/EgkHqAAAAAAAAAAAEQoIuh0TDP8RCQP8EwsE/xEKA/8QCQP/
+    BgEA/xILCf8XDQj/DwoD/x0UDf8KBgD/DQYB/xILBf8XDQj/CQQA/wwGBP8dFhH/IxcR/x4W
+    Df8oHRX/HRYQ/w8IAf8TCgP/EAoD/xMJBP8QCwP/EggE+xYQCP8eFQ+oAAAAAAAAAAAXEAq6
+    HBIK/xEJA/wTCwT/EQoD/wkDAP8uIRb/KR4T/xsSCf8mHA//QzEg/xsTCv8ZEAn/IxcN/xsQ
+    CP8IBAP/KR0X/ykhF/8hFxL/KSIZ/yUcFv8RCQP/EgsD/xgNBv8RDAP/FAoF/xIMBP8UCQT7
+    FQ4F/x8WEKgAAAAAAAAAABgTDLocEgv/EAkC/BMLBP8NBwH/Fg0K/zwtHv8gFw3/GQ8I/yEX
+    Df87Lh7/GA4I/xcPB/8VCwX/IhkQ/ysiG/8vIhr/KSAW/zgqJP8uKSH/DwgE/xEJA/8RCwT/
+    FwwG/xELA/8TCgX/EwwE/xMKBPsVDQb/IRgSqAAAAAAAAAAAGBMMuhwSC/8QCAH8EQgC/xEL
+    B/8cEg3/JBoQ/xQOB/8OBgD/EgsE/yQdFP8OBgL/BwMA/x8WEv85LiL/MCUd/zcsJf87NSv/
+    LSId/w8KBP8QCQP/EQkE/xAKA/8TCgT/EAoD/xMKBf8TDAT/EgoD+xUMBv8fGRKoAAAAAAAA
+    AAAaEw26HRMM/xEJAvwOBgH/GxMO/xEKBf8oHxP/FRAI/w4JAv8TDAb/KCAV/woDAf8XEg3/
+    PjAn/zouI/9FOS//PDIs/xQPC/8OBQD/EAoD/w8IA/8PCAP/EAoC/xMKBP8QCgP/EwoE/xML
+    BP8QCgP7Fw0H/yEbEqgAAAAAAAAAABsUDbofFQ3/EAoB/BAIBP8pHxb/Jx0U/11LNP86Lh//
+    KB4U/zImGf9LOiX/GxIN/0Y9Mv88MCn/Qjoy/ysjHP8YDgf/EAkC/xMLBP8SCwT/EAgD/wkE
+    AP8LBQD/FgwF/xEJA/8SCgP/FQwF/xELA/sYDgj/JBsTqAAAAAAAAAAAGxQNuh8UDf8PBwD8
+    Fg4I/x8WDv8RCQL/MScb/x0VDP8UCwT/GhEJ/yceE/85LSf/UEM2/1VIPf8lHhn/CQIA/xQL
+    BP8QCQP/DwkD/w8JA/8KBAH/GxUR/xALCP8IAwD/DggC/xAKA/8UCwX/EAsD+xcNB/8lGxOo
+    AAAAAAAAAAAcFQ+6IBUN/w4GAPwZEgv/HxYN/xAHAP8pIRb/GREJ/xMKA/8UDAT/Jh0S/0g6
+    Mf9SRjv/Mysl/wgCAP8TDAX/EAkC/w4HAv8NCAL/DAYC/wkFBP8qIh3/OC0k/w8LCf8HAgD/
+    DQgD/xMKBf8RCwL7Fw4H/ygcFagAAAAAAAAAAB4XELoiFw//DwYA/BsVDP8gGBD/EQsD/zAn
+    G/8cFQz/FA4G/xILA/86LiD/RDoz/05EOv8jHRn/CAMB/w8JA/8NBwL/DAYC/wkFAf8DAAD/
+    DwoI/0g5L/8rIhv/HxkW/zsvKv8GAwD/EwoF/xELA/sXDgf/KBwWqAAAAAAAAAAAHhcQuiMY
+    D/8QBwH8HBUN/zIlGv8nHhT/Y1I7/zwxI/8qIRf/LSAT/1FCMf9KPTT/TD4y/xwWEf8GAgD/
+    DggD/w4HA/8IAwL/CQYE/xUPDP84LyX/JR0Y/yUhHv9LQjr/YlJJ/yMfGf8PBQH/FAwE+xcP
+    B/8qHhaoAAAAAAAAAAAfGBG6IhkQ/xIJAfwYEAn/LCIb/xAIAP8xKR3/HRUM/xYNBP8VDQX/
+    Rzsx/zguJf8vJR3/HhgT/wMAAP8DAAD/AAAA/xkSD/8wJx7/LyUe/y8pJP9MQT3/ZFlP/1ZP
+    Rf9jVk//R0I6/wsEAP8UDQX7Fw8H/ywfGKgAAAAAAAAAACAaE7ojGhD/FAoD/BEKAv8rIRv/
+    FQ0F/yskGf8cEwv/FQwE/xEKA/9LPTD/NCsk/xgQC/9GPjj/Mysl/x8bGP81MCz/OTAq/y0m
+    H/9TSEP/dmxi/3ZnX/9vZl7/e3Ns/4J1cP9MR0D/CwQA/xYNBvsXEAf/LCEZqAAAAAAAAAAA
+    IhoUuiUbEv8VCwT8EQkB/zIpI/8nHhb/Oi4f/ykhFf8bEwv/HhYM/0Y2Jf8xJhv/CQMA/w4J
+    CP8nHxn/RDw2/3JnXP9gVlD/b2Ze/3VqY/9WTkX/XVRN/4qCev9BOzX/Mi0p/zErJv8QBwH/
+    FQ0G+xkRB/8tIhmoAAAAAAAAAAAjGhO6KB0T/xUNBvwUDAP/LSId/1JKP/9SQCz/NCka/ysg
+    Ff8xJRf/SDcj/yggGv9QR0P/VkxF/zQrJP9US0X/bmVd/4Z8dv9rYVT/WUUv/y8nJP95b2f/
+    SEA7/wwDAP8YDgb/Fg0G/xkPB/8VDQX7GhIJ/zAlHKgAAAAAAAAAACUbFLopHxX/Fg0G/BsS
+    Cf8TBwL/Lyoj/1FEPP8WDwf/EAcB/xUNBP8aEQj/AAAA/yAZGP9GPDX/Rj85/4iBfP+CeHD/
+    TkU//yYfGP97cWT/lo2G/4F5cf8oHhr/Gw4D/xwRCv8ZEAj/GxEJ/xcPB/sdEwr/MygfqAAA
+    AAAAAAAAJhwVuiogFf8XDQf8GhEI/xsQCf8QCAH/KiEc/z41Lf8ZEQv/CgYC/y4nI/9UT0z/
+    c2pj/1tSS/9FPzv/eXFq/1FHP/9vaWP/mpON/5WQi/+LhH7/a2Zg/xwTDv8bEAf/GhAJ/xkQ
+    CP8bEAn/Fw8H+x0TC/8zKh+oAAAAAAAAAAAnHhe6LCEX/xcNB/wbEgn/GxAI/xkQCP8QCAL/
+    IxwZ/zYsJv8pIhr/Ni4s/zEtK/8fGxr/JyEe/310bP92a2H/g3t3/5mUjP9uZmH/c21m/z02
+    Mf8RCAL/GA4H/x0SCv8ZDwn/GRAJ/xwRCv8XDwf7IBUM/zUsIqgAAAAAAAAAACceGLotIhj/
+    GQ8H/B0TCv8dEQr/GhEI/xkQCv8zKyf/QDUw/ywmH/8MBQH/MCkn/2lhWf92bmj/fHdy/1pX
+    U/9pY1//amRd/1pUT/9jW1f/DgMA/x0SCv8fEwr/KBkM/x4SCv8cEgr/HhIK/xkQB/shFQ3/
+    NiwiqAAAAAAAAAAAKR8YujAlGv8bEQj8IBUL/x8UC/8dEwr/GA8H/xIIAf8BAAD/DQkJ/3Vw
+    af+akYn/WFNQ/yUhIf8tIx3/PzYv/3xybP9JRD7/MSom/yofGf8aDwb/HxQL/yEUC/8uHg//
+    IhQL/x4UCv8gFAv/GhEI+yIWDv85LyWoAAAAAAAAAAApHxi6MiYa/x4TCfwiFwz/IRYM/x0T
+    C/8YEAj/DAQA/wsHBf+Bd3D/e3Rs/xgWFP8AAAD/UEhA/2teVf+KhX//NSwn/xIIAf8YDwb/
+    HREI/x4UC/8dEwr/HhML/yAVC/8eEgv/HRMK/x4TC/8aEAj7IxcO/zsvJ6gAAAAAAAAAACkg
+    Gro1Jxv/HxQJ/CQYDf8iFwz/IBUM/xILA/8aFhT/eXFu/2RfWf8HAAD/DQkH/2tgW/9rZl7/
+    e3Ry/zcwKf8UBwD/IBUN/x8UC/8hFQv/HxQK/x4TCv8gFAv/IhcM/yATC/8fFQv/HxML/xsR
+    CPslGRD/PjAoqAAAAAAAAAAAHhcRuj0wI/8gFAn8JhoO/yQYDv8gFAn/NCsm/2djX/9GPDb/
+    DgYA/xwTD/97dm//T0U//x8YEP82LSj/Gg8D/yYaDv8hFQv/IhYM/yMXDP8iFgz/IRUM/yQW
+    Df8qHA7/IxYN/yAWC/8iFQ3/GxEH+y4hFv8+LSeoAAAAAAAAAAAKBQG6PzIp/zEjFvwfFAj/
+    JhkO/yUZDf8rHxX/HxUK/x0QBf8bEAf/U01J/0A5Mf8WCgD/IhcM/x8TCf8kGQ7/JRgN/yMY
+    Df8kGA3/JBgN/yQYDv8kGA3/JhkO/ycbD/8kFw7/IhcN/yEUC/8bEgf7QTQp/xwSD6gAAAAA
+    AAAAAA0IArgWDwv8STwx+TQnGvwkFwv8IRcK/CEUCPwiFwv8IhcL/CEWCvwkGxD8GxAE/CIX
+    DPwfFQr8IhYM/B8VCvwgFAr8HhQJ/B8UCvwfFAn8IRUK/CAWCvwhFQv8HxYK/CAUCvwdFAn8
+    KBoR/Ec6L/gnIRr8DAQBpgAAAAAAAAAAEgsGxREKBP8VDgr/OjAn/0U2K/9CNin/RDUp/0M0
+    KP9BNSj/RDQp/0A0J/9DNSn/QTQo/0A0KP9DNCn/QDUo/0IyKP9ANSj/QjQp/0E1Kf9DNCn/
+    PzQo/0IzKP8/NCf/QjIp/z81Kf9DNi7/IxsW/w4JAv8UDAeyAAAAAAAAAAAQCwWIEwwGuw8J
+    ArgIBAC6FA8JuhwXEboeFRG6HhURuhwXEboeFxO6HBcTuhwVEbocFRG6HBcRuh4XE7oeFxG6
+    HBURuhsXEboeFRG6GxURuhwVEbocFxG6HhURuhwXEbofFxO6GhQPugwGAroLBQC3FA0GuxIK
+    BnsAAAAAAAAAAAAAAAAAAAAAAAAAAAEBAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACgAAAAwAAAA
+    YAAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAABhMNBicNBgYnDQYAJw0GBicNDQYnBgYAJwAAACcAAAAnAAAAJwAA
+    ACcAAAAnAAAAJwAAACcAAAAnAAAAJwAAACcAAAAnAAAAJwAAACcAAAAnAAAAJwAAACcAAAAn
+    AAAAJwAAACcAAAAnAAAAJwAAACcAAAAnAAAAJwAAACcAAAAnAAAAJwAAACcAAAAnAAAAJwAA
+    ACcAAAAnBgAAJxMGBicNBgAnDQYAJwwGBigNDQYlAAAAAwAAAAAAAAAADQ0GJxAKBP8OCAP/
+    DgkD/w0HA/8GAgD/BwUC/w8IBv8SCwj/EQ4J/xUMC/8TDAr/EA4J/xULCv8SDAn/EQ0I/xYL
+    C/8RDQn/Eg0J/xYMC/8SDgn/Eg4J/xUMCv8TDQn/Eg0I/xMMCf8VDAr/Eg0J/xINCf8VDAv/
+    Eg0J/xQNCv8UDQr/EQ0J/xYLCv8RDQj/EQwI/xULCv8PCwf/CwcD/wgCAf8HBQH/DQgC/hEI
+    BP8QCgTvDAwAFAAAAAAAAAAAEw0GJxAJBP8NCAP/CgUC/gcCAf8UDgr/HxcQ/yIUD/8cEw3/
+    GhUM/x8SDv8cEw3/GRQL/x8QDf8ZEgv/GRIL/yAQDf8YEwv/GBAL/xsODP8VDwr/FQ4J/xgM
+    C/8WDQr/FA4J/xYNCv8YDAv/Fg8K/xYOCf8ZDQv/FQ4K/xcNCv8XDgv/FA8J/x0PDP8aEwv/
+    GRIL/x4QDf8bFQz/HRcO/x8SD/8LBwT/BgQA/xAIBP8QCQPuDAwAFAAAAAAAAAAAEw0GJxAJ
+    BP4LBgL+CAMB/SAUD/4eFQ3+EgsE/hIJA/4PCQL+DQkB/g8HA/4NCAH+DAgB/hAGA/4LCAH+
+    CgUA/goBAP4FAwD+CAMB/g8GBf4NCgb+EgwH/hMJB/4RCgf+DgsF/g8JBf4RCAX+BwUB/gwH
+    Bf4QCAb+CwgF/g4HBv4NCAX+DgoG/g8FA/4NCAH+DAkB/hEHA/4OCAL+DQoC/hgMCP4kFxL+
+    EQwI/QoFAf8RCQTuDAwAFAAAAAAAAAAAEw0GJw8JA/8HAwH/IBUR/hwQC/8NCAD/EQoE/xQK
+    Bf8RCwT/EQoE/xIJBf8PCQP/EAkE/w8FA/8HBAD/DAcE/xYLCf8XEgv/HBIN/x8PDf8VDwf/
+    KBwR/xwPC/8VDAf/Ew4G/xUMBv8WCwb/DAgE/yAVEP8eEw3/GhQN/x4SDf8dFA3/HRcO/xMI
+    Bv8SCgP/EAwD/xMKBf8SCQT/DwsC/w8IAv8TCQX/IhsT/hAKB/8MBQLuGQwMFAAAAAAAAAAA
+    Ew0GJwsFAf8VDgr/IBUP/g4HAf8SDAP/EgsE/xMKBP8QCwP/EQkE/xAIA/8NCQP/CAMA/w0G
+    BP8UEAr/KBwT/yoaFP8NCQP/DwgC/xIHA/8MBwL/HBIJ/xIHBP8MBgH/DAcB/w4GAv8IAgD/
+    Ew0J/yEVD/8aEgz/GRMM/x0RDf8dFQ3/FxIL/w8GA/8TCwP/DwsC/xEJBP8TCQT/DwoC/xIL
+    BP8UCAX/EQwF/iEaEf8NBQTuDAwAFAAAAAAAAAAADQYGJwwGA/8hGBH/FAsF/hMLA/8RCwP/
+    EwoE/xIKBP8QCgP/EAgD/w4HAv8FAgD/FA0K/yMXEv8SDAb/HxQM/yQYEP8LBgH/EQoD/xQJ
+    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
+    fv9eWVX/XVlY/ysoJP8jHxv/OzQu/1JHP/+moZr/My8q/2pkYf9UTEn/EQQA/yAVC/8gEwr/
+    IRQL/yIUCv8/KRX/LRwO/yMUC/8gFQv/HxML/yQUDP8fFAr/GBAI/iETC/89MSfuAAwAFAAA
+    AAABAQEAAAAAJywiHP84LCD/GhAI/iEVDP8gFQv/IBUL/x8UC/8dEwv/GxEK/xYPB/8WDgb/
+    FQoG/wgHA/8EAgL/XVJP/5eShf+blIv/bmdl/yopKP8BAAH/KyAb/zwvJv83Lib/hXpx/4qC
+    fv9KRkH/BwAA/zcyLf8eEw3/HhMH/xsSCf8eEgr/HhMK/x0SCv8oGw7/IRUM/x8SCv8cEwr/
+    HBMK/yASC/8cEgr/GBEI/iASC/8/MinuAAwAFAAAAAABAQEAAAAAJysiHP85LB//GxEI/iIX
+    DP8hFgv/IRUL/x8VDP8eEwv/GxAK/xYOBf8TCwT/EQgG/wAAAP9VTkj/pJKM/35+dv80MS7/
+    CAEA/wAAAP8wKyb/dGRb/0k9Nf+TjIT/hIF7/xsSDf8UCQP/HRQJ/xYMA/8fEQr/HxQK/xwS
+    Cv8eEwv/HRML/x0SC/8jFgv/HhQL/x8SC/8dEwr/HBQK/yASC/8cEQn/GRII/iATDP9AMyru
+    AAwAFAAAAAABAQEAAAAAJywjHP87LSD/HRII/iMYDP8iFwz/IxcM/yEXDP8eFAv/GxAK/xUO
+    Bv8OCAT/AAAA/0Q+Of+emI7/b2Vh/xMOCv8CAAD/AwAA/y0nI/+Bem//a2Jb/4B4c/+KiIP/
+    Fw8J/xwOBv8fFAz/GxIJ/x4TC/8gEwr/IBUL/x0TCv8eEwr/HhQL/yAUC/8lGAz/HxUL/yAT
+    C/8eEwv/HRQK/yASC/8dEgr/GhMI/iEUDP9AMyruAAAAFAAAAAABAQEAAAAAJyohGv89MCL/
+    HhIJ/iQZDf8jGAz/JBcN/yIXDP8gFgv/HxML/xAJAf8FAgD/WVBO/6Kalv9ZWFP/EwgE/xAI
+    BP8KCQX/SD05/46DfP9wbmb/RD46/5eQjv8eFhD/GhAG/yEUDP8eEgr/HRQK/x8UC/8hFAv/
+    IBYL/x4TCv8eEwr/HxUL/yEUC/8jFwz/HxUL/yITDP8fFAv/HRQK/yATDP8eEwr/GhMI/iMW
+    Df9DNS7uAAAAFAAAAAAAAAAAAAAAJx8YE/9HOiz/HxQJ/iYaDv8kGA3/JBgN/yQYDP8iGQz/
+    IRQK/zUvK/97e3f/g315/zsyLf8PCQD/GxAK/wgAAP9lYlr/mJCK/0lAPP8QCwX/RT46/z00
+    MP8UCgH/JRoN/yIVC/8hFAz/IBYM/yIWDP8jFgz/IhcL/yEUC/8gFAv/IBYL/yIUDP8pHA3/
+    IxgM/yMTDP8gFgv/HxUK/yIUDP8gFAv/GRIH/i0fFf9GNi/uAAAAFAEBAQAAAAAAEw0GJw0I
+    A/9OQDX/LB0S/iMXDP8lGQ3/JRkN/yQYDf8kGQ3/JBgO/0Q7Nv85Mir/FwwE/xsOBf8iGA7/
+    DQUA/1BHRP+Oi4X/KCIa/xkLA/8gFgv/HxYM/x0RCP8iFwz/JhkN/yUYDP8jFgz/IhgM/yMX
+    Df8kFw3/JBoN/yQXDf8jFw3/IxgN/ycXDv8wIRD/JxsO/yUVDf8iFwz/IRcM/yMVDP8jFw3/
+    FA4D/kU0KP8wIhzuAAAAFAEBAQAAAAAAGhMNJwsFAP8qIRz/V0U3/h4SBv8mGw7/JxoO/yUZ
+    Df8kGg3/JhkO/x4RBv8dEwX/JRkO/yUYDv8gFAn/IRoT/3Nta/8kHBP/GxEF/ycYD/8iFwz/
+    IhYM/yQXDf8iFwz/IhcM/yMWDf8iFw3/IhcM/yMXDP8jFw3/IhcM/yQXDf8jFwz/IxgM/yUX
+    Df8iGQ3/IhcN/yMVDf8gFgv/IRcM/yYXD/8aDwb/KCAT/lBANv8PBgTuGRkMFAAAAAAAAAAA
+    Ew0GJxINBf8HAgD/QzYw/lFDM/8gFQn/IhUJ/yUZDf8kGg3/JhoN/ygaD/8mGg//JBoN/yUZ
+    Dv8kFgv/KSAV/ycdFP8hFQr/JRsP/yUYDf8jGQ3/JRkO/yUZD/8kGg3/JBkN/yQYDf8kGA3/
+    IxgN/yUXDv8kFw3/IxgN/yYYDv8kGQ7/JRoO/ycYD/8kGg7/JRgN/yUXDv8hGAz/HxUL/xsN
+    Bv8tIBb/WU9B/hsUEP8QBwTuJhkMFAAAAAAAAAAAEw0GJxALBf4SCwb+CgMC/T0zLP5XSTv+
+    PC0g/iodEP4kGQz+IxkM/iUYDP4kGA3+IRkM/iIXC/4kFw3+HxYJ/iEVCv4kGA3+IBcL/iIW
+    DP4gFwz+IhcM/iMXDf4hFwv+IBYL/iIWDP4fFgv+IBYL/iIWDP4gFgv+IRcM/iQYDf4gGAv+
+    IhcM/iQWDP4hGAv+IRcM/iMWDf4gGAv+KSAU/ks5L/5bS0D+HBkT/QsHAv8VDAfuDAwAFAAA
+    AAAAAAAAEw0GJxELBf8RCwb/FAwG/gkEAP8eGRT/Rjox/1FDOP9TRTj/U0Y4/1VEOP9VQTf/
+    UEU3/1NFN/9XQzn/UUc4/1NEOP9TQjb/UEU3/1RCOP9RQzf/UEM2/1VCOf9QRTf/UUM3/1NC
+    N/9QRTf/UkU5/1RCN/9QRTj/U0Y5/1ZCOP9OQzb/UUI2/1RBN/9ORDX/UEE2/1RBOP9ORDb/
+    TkM4/zovKf8QCgf/CwcC/xQNB/8SCgXuGQwAFAAAAAAAAAAADQ0GJxELBf8SCwX/EgsF/xMN
+    Bv8NCAL/CQQA/w8KBv8WEAz/FhEN/xcRDf8ZEA3/FRIM/xcSDf8aEQ7/FRMN/xcRDv8XEA3/
+    FhEM/xgQDf8WEQ3/FhIN/xkRDv8XEw3/FxEN/xcQDP8VEQz/FxEN/xcQDf8VEQz/FxEN/xcQ
+    Df8WEg3/GBEO/xgRDf8WEgz/GBEN/xkSDv8TEAr/DQcD/wkEAP8QCwX/EgwF/hILBf8SCgXv
+    DAwAFAAAAAAAAAAAAAAABhMNBicTDQYnEw0GJw0NBicTDQYnGhMNJxMNBicGAAAnAAAAJwYA
+    ACcGAAAnAAAAJwYAACcGBgAnAAYAJwYGACcGAAAnBgAAJwYAACcGAAAnBgAAJwYAACcGBgAn
+    BgAAJwYAACcAAAAnAAAAJwAAACcGAAAnBgAAJwAAACcGAAAnBgAAJwYAACcGAAAnBgYAJwYG
+    ACcGBgAnExMGJxoTDScTDQYnEw0GJxMMBigUDQYlAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    AAAAAAAAAAAAAAAAAAAAAAAAAAA=
+"""
+
+
+def claim_taskbar_identity():
+    """Tell Windows this program is its own application.
+
+    Without an explicit identity, a Python program can be grouped under the
+    interpreter or the toolkit, and the taskbar shows their icon instead of
+    ours. This has to run before any window exists.
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "LMMRZWG.Gridwyrm")
+    except Exception:
+        pass
+
+
 # ==========================================================================
 # Silent launch
 # ==========================================================================
 
-def launched_as_plain_py():
-    """True when started from gridwyrm.py rather than gridwyrm.pyw."""
-    name = os.path.basename(sys.argv[0] if sys.argv else "").lower()
-    return name.endswith(".py")
-
-
 def hide_own_console():
     """Hide the console window, but only if this process owns it.
 
-    Double-clicking gridwyrm.pyw means no console exists and this does nothing.
-    Double-clicking gridwyrm.py does create one, and that console is left alone
-    on purpose: running the .py version is how you watch for errors, so hiding
-    its window would defeat the point. A terminal you opened yourself is never
-    touched either, which is what the process-ID check is for.
+    Double-clicking the .pyw means no console exists and this does nothing at
+    all. It matters if the file is ever renamed to .py and double-clicked,
+    where python.exe opens a console of its own.
+
+    The ownership check is the important part: a terminal you opened yourself
+    belongs to that terminal, not to Gridwyrm, so it is left alone. That is
+    what makes "python gridwyrm.pyw" a usable way to watch for errors.
     """
-    if not IS_WINDOWS or launched_as_plain_py():
+    if not IS_WINDOWS:
         return
     try:
         kernel32, user32 = ctypes.windll.kernel32, ctypes.windll.user32
@@ -619,6 +941,7 @@ ACTIONS = (
     ("cell_up", "Cell size larger", True),
     ("cycle_shape", "Next grid shape", False),
     ("focus_panel", "Bring this panel to the front", False),
+    ("reveal_ranges", "Hold to show range bands to players", False),
 )
 
 # Every default uses three modifiers. Two is not enough in practice: Ctrl+Alt+G
@@ -635,6 +958,7 @@ DEFAULT_HOTKEYS = {
     "cell_up": ["Ctrl + Alt + Shift", "K"],
     "cycle_shape": ["Ctrl + Alt + Shift", "B"],
     "focus_panel": ["Ctrl + Alt + Shift", "P"],
+    "reveal_ranges": ["Ctrl + Alt + Shift", "R"],
 }
 
 # Saved settings normally take precedence over defaults, which is right for
@@ -728,6 +1052,10 @@ if IS_WINDOWS:
             wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
             ctypes.c_int, ctypes.c_int, wintypes.UINT]
         u32.EnumDisplayMonitors.restype = wintypes.BOOL
+        # A registered hotkey reports its press but never its release, so
+        # hold-to-reveal has to watch the key directly.
+        u32.GetAsyncKeyState.restype = ctypes.c_short
+        u32.GetAsyncKeyState.argtypes = [ctypes.c_int]
         if hasattr(u32, "GetDpiForWindow"):
             u32.GetDpiForWindow.restype = wintypes.UINT
             u32.GetDpiForWindow.argtypes = [wintypes.HWND]
@@ -1119,6 +1447,386 @@ def hex_polys(w, h, size, off_x, off_y, pointy=True):
 
 
 # ==========================================================================
+# Measuring
+# ==========================================================================
+# Gridwyrm knows a cell is so many pixels wide. On its own that says nothing
+# about the map: a square could be five feet or five miles. Declaring how much
+# ground one square covers is what turns pixels into distance, and it is the
+# piece everything else here depends on.
+
+DIAGONAL_RULES = ("Diagonal counts as one square", "True distance")
+UNIT_CHOICES = ("ft", "m", "squares")
+
+
+def snap_to_axis(x1, y1, x2, y2, tolerance=8.0):
+    """Straighten a span that is nearly horizontal or nearly vertical.
+
+    Held back behind the Shift key rather than applied automatically. It earns
+    its place when calibrating, where a couple of degrees of hand wobble gets
+    baked into the cell size as a permanent error, but snapping every line by
+    default fights you the rest of the time.
+
+    Returns (x, y, snapped).
+    """
+    dx, dy = x2 - x1, y2 - y1
+    if dx == 0 and dy == 0:
+        return x2, y2, False
+    angle = math.degrees(math.atan2(abs(dy), abs(dx)))
+    if angle <= tolerance:
+        return x2, y1, True
+    if angle >= 90.0 - tolerance:
+        return x1, y2, True
+    return x2, y2, False
+
+
+def grid_distance(dx, dy, cell, rule):
+    """Distance in squares between two points, under the chosen diagonal rule.
+
+    Most tables play the first rule: moving diagonally costs the same as moving
+    straight, so a span three squares across and three down is three squares,
+    not four and a bit. The second measures the true line, for tables that
+    prefer the honest figure.
+    """
+    if cell <= 0:
+        return 0.0
+    across, down = abs(dx) / float(cell), abs(dy) / float(cell)
+    if rule == DIAGONAL_RULES[1]:
+        return math.hypot(across, down)
+    return max(across, down)
+
+
+def tidy_number(value, places=1):
+    """Trim pointless zeros: 6.0 becomes 6, and 7.50 becomes 7.5.
+
+    The check for a decimal point matters. Stripping zeros unconditionally would
+    turn a whole number like 20 into 2 when places is nought.
+    """
+    text = ("%." + str(places) + "f") % round(float(value), places)
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def format_measurement(dx, dy, cell, rule, per_square, unit):
+    """The readout shown while and after measuring."""
+    pixels = math.hypot(dx, dy)
+    squares = grid_distance(dx, dy, cell, rule)
+    parts = ["%d px" % round(pixels), "%s squares" % tidy_number(squares)]
+    if unit != "squares":
+        parts.append("%s %s" % (tidy_number(squares * per_square, 0), unit))
+    return "   \u00b7   ".join(parts)
+
+
+def cell_size_from_span(dx, dy, squares):
+    """Work backwards: this span was N squares, so a square is this wide.
+
+    Returns None when the answer would be meaningless, which keeps a stray
+    click or an empty box from destroying an alignment that already worked.
+    """
+    try:
+        count = float(squares)
+    except (TypeError, ValueError):
+        return None
+    if count <= 0:
+        return None
+    length = math.hypot(dx, dy)
+    if length < 4:
+        return None
+    size = length / count
+    if size < 8 or size > 400:
+        return None
+    return round(size, 2)
+
+
+# ==========================================================================
+# Range bands
+# ==========================================================================
+# Named distances instead of numbers. The point is that a player can be told
+# they are "Near" without anyone saying thirty feet out loud, so the band name
+# is the answer rather than a label on a figure.
+#
+# The defaults are invented rather than taken from a system, but the distances
+# behind them are real 5e ones: reach of a weapon, a round of walking, the
+# limit of darkvision, the reach of a longbow.
+
+# Kept deliberately tight. Bands are absolute distances turned into pixels by
+# the cell size, so a generous set becomes enormous the moment someone works at
+# a 100px cell. Five squares out is 500 pixels there, which is already most of
+# a laptop screen. Anything larger is better set by hand, for a table that
+# knows its own screen.
+DEFAULT_BANDS = (
+    ("Melee", 5.0),
+    ("Close", 10.0),
+    ("Near", 15.0),
+    ("Far", 25.0),
+)
+
+RANGE_MODES = ("Off", "DM only", "Show players")
+MAX_BANDS = 8
+
+# ==========================================================================
+# Conditions
+# ==========================================================================
+# A marker dropped on a creature to say what is happening to it: poisoned,
+# burning, blessed. Unlike range bands these are not about distance, so they do
+# not scale with anything except the cell size, and they are always visible.
+# There is no reason to hide from the table that something is on fire.
+#
+# Colour carries the meaning, which is why each condition owns one. Names are
+# there for the DM and for anyone who cannot rely on colour alone.
+
+# The official conditions, coloured after the plastic rings people slip over a
+# miniature's base. Two habits are borrowed from those: the name is printed on
+# the band rather than beside it, and it is printed twice, on opposite sides, so
+# it reads from any seat at the table. Several of these are near-white in the
+# physical set, where the printing tells them apart; here they are nudged apart
+# a little as well.
+DEFAULT_CONDITIONS = (
+    ("Blind", "#E8B923"),
+    ("Charmed", "#E88AA0"),
+    ("Deaf", "#5A2E1E"),
+    ("Exhausted", "#8B1A1A"),
+    ("Frightened", "#FFFFFF"),
+    ("Grappled", "#D32027"),
+    ("Incapacitated", "#1F3A93"),
+    ("Invisible", "#D8E8F0"),
+    ("Paralyzed", "#5B2D8E"),
+    ("Petrified", "#B8BCC0"),
+    ("Poisoned", "#1E7A34"),
+    ("Prone", "#2FA8E0"),
+    ("Restrained", "#F07818"),
+    ("Stunned", "#F0D000"),
+    ("Unconscious", "#8C9196"),
+)
+MAX_CONDITIONS = 20
+
+# Saved settings beat defaults, which is right for anything chosen deliberately
+# and wrong for a list that was only ever inherited. Gridwyrm shipped with five
+# invented conditions before the full set existed; a saved list that still
+# matches those exactly was never a choice, so it is replaced.
+CONDITION_DEFAULTS_VERSION = 2
+SUPERSEDED_CONDITIONS = (
+    (("Poisoned", "#4CAF50"), ("Burning", "#E2483D"), ("Frozen", "#4A90E2"),
+     ("Blessed", "#F5C542"), ("Cursed", "#9B59B6")),
+)
+
+
+def normalise_conditions(text, version=0):
+    """Read the saved conditions, upgrading a list that was never chosen."""
+    conditions, _error = parse_conditions(text)
+    if not conditions:
+        return [list(pair) for pair in DEFAULT_CONDITIONS]
+    if version < CONDITION_DEFAULTS_VERSION:
+        current = tuple(tuple(pair) for pair in conditions)
+        for superseded in SUPERSEDED_CONDITIONS:
+            if current == superseded:
+                return [list(pair) for pair in DEFAULT_CONDITIONS]
+    return [list(pair) for pair in conditions]
+
+
+def cell_footprint(kind, cell):
+    """How wide one cell is, edge to edge.
+
+    A square grid's cell size is the length of a side. A hex grid's is the
+    centre-to-vertex radius, which makes the hex about 1.73 times wider than
+    the number suggests. Sizing a marker against the raw figure therefore came
+    out far too small on hexes. Measuring the short diameter instead makes both
+    grids behave the same, so the default looks right either way.
+    """
+    if str(kind).startswith("Hex"):
+        return math.sqrt(3.0) * float(cell)
+    return float(cell)
+
+
+def validate_conditions(rows):
+    """Check name and colour pairs from the editor.
+
+    Returns (conditions, error message).
+    """
+    conditions = []
+    for index, (name, colour) in enumerate(rows, start=1):
+        name = str(name).strip()
+        colour = str(colour).strip()
+        if not name and not colour:
+            continue                             # an untouched row
+        if not name:
+            return None, "Row %d has no name" % index
+        if "=" in name:
+            return None, "Row %d: a name cannot contain an equals sign" % index
+        if not HEX_RE.match(colour):
+            return None, "Row %d: %s is not a six-digit colour" % (
+                index, colour if colour else "the colour is blank")
+        conditions.append((name, colour.upper()))
+
+    if not conditions:
+        return None, "Give at least one condition"
+    if len(conditions) > MAX_CONDITIONS:
+        return None, "%d conditions is as many as fits" % MAX_CONDITIONS
+    seen = {}
+    for name, _colour in conditions:
+        key = name.lower()
+        if key in seen:
+            return None, "Two conditions are both called %s" % seen[key]
+        seen[key] = name
+    return conditions, ""
+
+
+def format_conditions(conditions):
+    return "\n".join("%s = %s" % (name, colour) for name, colour in conditions)
+
+
+def parse_conditions(text):
+    """Read the 'Name = #RRGGBB' lines kept in the settings file."""
+    rows = []
+    for line in str(text).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") and "=" not in line:
+            continue
+        name, _, colour = line.partition("=")
+        rows.append((name, colour))
+    if not rows:
+        return None, "nothing to read"
+    return validate_conditions(rows)
+
+
+def parse_bands(text):
+    """Read 'Name = distance' lines. Returns (bands, error message).
+
+    One band per line keeps this editable without a row of widgets per band,
+    and lets someone with a ten-band system just type it.
+    """
+    bands = []
+    for number, line in enumerate(str(text).splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            return None, "Line %d needs a name, then =, then a distance" % number
+        name, _, value = line.partition("=")
+        name = name.strip()
+        if not name:
+            return None, "Line %d has no name" % number
+        try:
+            distance = float(value.strip().replace(",", "."))
+        except ValueError:
+            return None, "Line %d: %s is not a number" % (number, value.strip())
+        if distance <= 0:
+            return None, "Line %d: the distance has to be above zero" % number
+        bands.append((name, distance))
+    if not bands:
+        return None, "Give at least one band"
+    if len(bands) > MAX_BANDS:
+        return None, "%d bands is as many as stays readable" % MAX_BANDS
+    bands.sort(key=lambda pair: pair[1])
+    return bands, ""
+
+
+def validate_bands(rows):
+    """Check name and distance pairs from the editor.
+
+    Separate from parse_bands, which reads the text kept in the settings file.
+    Working from pairs means a name can contain anything except an equals sign,
+    and it catches two things the text form could not: a row left completely
+    blank, which is simply skipped rather than treated as an error, and two
+    bands sharing a name, which would put two identical labels on the map.
+
+    Returns (bands, error message).
+    """
+    bands = []
+    for index, (name, value) in enumerate(rows, start=1):
+        name = str(name).strip()
+        value = str(value).strip().replace(",", ".")
+        if not name and not value:
+            continue                             # an untouched row
+        if not name:
+            return None, "Row %d has no name" % index
+        if "=" in name:
+            return None, "Row %d: a name cannot contain an equals sign" % index
+        if not value:
+            return None, "Row %d has no distance" % index
+        try:
+            distance = float(value)
+        except ValueError:
+            return None, "Row %d: %s is not a number" % (index, value)
+        if distance <= 0:
+            return None, "Row %d: the distance has to be above zero" % index
+        bands.append((name, distance))
+
+    if not bands:
+        return None, "Give at least one band"
+    if len(bands) > MAX_BANDS:
+        return None, "%d bands is as many as stays readable" % MAX_BANDS
+    seen = {}
+    for name, _distance in bands:
+        key = name.lower()
+        if key in seen:
+            return None, "Two bands are both called %s" % seen[key]
+        seen[key] = name
+    bands.sort(key=lambda pair: pair[1])
+    return bands, ""
+
+
+def format_bands(bands):
+    return "\n".join("%s = %s" % (name, tidy_number(distance, 2))
+                     for name, distance in bands)
+
+
+def band_radii(bands, cell, per_square):
+    """Turn each band into a ring radius in pixels.
+
+    Distances are given in whatever unit the panel is set to, so they go
+    through squares to reach pixels: a 30ft band with 5ft squares and 64px
+    cells lands at six squares, which is 384 pixels.
+    """
+    if cell <= 0 or per_square <= 0:
+        return []
+    return [(name, (distance / float(per_square)) * float(cell))
+            for name, distance in bands]
+
+
+def contrast_halo(colour):
+    """An outline that will show against the colour it surrounds.
+
+    Every band is drawn twice, a wider outline under a narrower fill, because
+    the map beneath is unknown. A pale band needs a dark outline and a dark one
+    needs a pale outline, or half the ring disappears into the terrain.
+    """
+    return "#FFFFFF" if luminance(colour) < 0.45 else "#000000"
+
+
+# Bands are always drawn as circles. Under a "diagonal counts as one" rule the
+# reachable area is strictly a square, and an earlier version drew it that way
+# for consistency. On a square grid that was unreadable: a square ring is
+# indistinguishable from the grid it sits on. The diagonal rule still governs
+# the measuring readout, where counting squares is the whole point, but a range
+# indicator has to look nothing like the grid underneath it.
+
+# Bands are never filled. Tk has no alpha channel, so an earlier version faked
+# transparency with a stipple bitmap, and even the sparsest one Tk offers
+# covered the map. Revealing a band means putting its name on the ring, not
+# shading everything inside it.
+RING_WEIGHT_PRIVATE = 1
+RING_WEIGHT_REVEALED = 3
+
+
+def visible_rings(rings, width, height):
+    """Split bands into the ones worth drawing and the ones that will not fit.
+
+    A ring wider than the screen is not a range indicator, it is an off-screen
+    arc, and at a large cell size the outer bands go that way quickly. Keeping
+    the radius inside half the shorter edge means a centred ring is fully
+    visible and an off-centre one still mostly is. The rest are named in the
+    panel instead, so their absence is stated rather than mysterious.
+    """
+    if width <= 1 or height <= 1:
+        return list(rings), []
+    limit = min(width, height) / 2.0
+    fits = [(name, radius) for name, radius in rings if radius <= limit]
+    too_big = [name for name, radius in rings if radius > limit]
+    return fits, too_big
+
+
+# ==========================================================================
 # Small helpers
 # ==========================================================================
 
@@ -1181,6 +1889,20 @@ class Overlay:
             self.win.attributes("-transparentcolor", KEY_COLOR)
         self.width = self.height = 0
         self._click_through = False
+        self.can_rotate_text = self._probe_rotated_text()
+
+    def _probe_rotated_text(self):
+        """Rotated canvas text needs Tk 8.6. Ask once, off-screen.
+
+        Checked up front rather than while drawing, because recovering from a
+        failure halfway through would mean clearing marks already placed.
+        """
+        try:
+            item = self.canvas.create_text(-999, -999, text="x", angle=45)
+            self.canvas.delete(item)
+            return True
+        except tk.TclError:
+            return False
 
     def place_on(self, x, y, w, h):
         self.width, self.height = w, h
@@ -1216,6 +1938,285 @@ class Overlay:
         except tk.TclError:
             pass
 
+    # -- measuring ---------------------------------------------------------
+
+    def set_measure_surface(self, active):
+        """Make the whole overlay catch the mouse, or return it to see-through.
+
+        This is the part that is easy to get wrong. Tk's transparent colour key
+        does more than hide those pixels: Windows also leaves them out of hit
+        testing, so the background passes clicks through even with
+        WS_EX_TRANSPARENT removed. Only the grid lines themselves were
+        clickable, which made measuring impossible.
+
+        So the colour key has to go for the duration, and the background
+        becomes a real surface. Reduced opacity keeps the map readable
+        underneath, and the wash doubles as an unmistakable signal that the
+        overlay is holding the mouse.
+        """
+        if active:
+            if IS_WINDOWS:
+                try:
+                    self.win.attributes("-transparentcolor", "")
+                except tk.TclError:
+                    # Some builds refuse an empty value; a colour that will
+                    # never appear on screen has the same effect.
+                    self.win.attributes("-transparentcolor", "#FE01FE")
+            self.canvas.configure(bg=MEASURE_WASH)
+            self.win.attributes("-alpha", MEASURE_ALPHA)
+        else:
+            self.canvas.configure(bg=KEY_COLOR)
+            if IS_WINDOWS:
+                try:
+                    self.win.attributes("-transparentcolor", KEY_COLOR)
+                except tk.TclError:
+                    pass
+            # The caller restores the user's own opacity setting.
+
+    def show_measure_hint(self, text, font):
+        """A note on the overlay itself, since that is where you are looking."""
+        c = self.canvas
+        c.delete("hint")
+        if not text or self.width <= 1:
+            return
+        pad = 10
+        probe = c.create_text(0, -200, text=text, anchor="nw", font=font,
+                              tags="hint")
+        bounds = c.bbox(probe)
+        c.delete(probe)
+        text_w = (bounds[2] - bounds[0]) if bounds else 260
+        text_h = (bounds[3] - bounds[1]) if bounds else 16
+        x = (self.width - text_w) / 2 - pad
+        y = 24
+        c.create_rectangle(x, y, x + text_w + pad * 2, y + text_h + pad * 2,
+                           fill="#000000", outline="#FFFFFF", tags="hint")
+        c.create_text(x + pad, y + pad, text=text, anchor="nw", fill="#FFFFFF",
+                      font=font, tags="hint")
+
+    def begin_measure(self, on_click, on_move, on_cancel):
+        """Take clicks on the overlay so a span can be dragged out.
+
+        Click-through has to come off for this, since an overlay that ignores
+        the mouse cannot be measured on. That is the one genuinely dangerous
+        state in this program: a full-screen invisible sheet swallowing every
+        click. So the caller is responsible for restoring click-through no
+        matter how measuring ends, and there are several ways out - a second
+        click, a right-click, Escape, the panel button, or a timeout.
+        """
+        c = self.canvas
+        c.configure(cursor="crosshair")
+        # The modifier state travels with the position: Shift constrains the
+        # line, as it does in any drawing tool.
+        c.bind("<Button-1>", lambda e: on_click(e.x, e.y))
+        c.bind("<Motion>", lambda e: on_move(e.x, e.y, e.state))
+        c.bind("<Button-3>", lambda e: on_cancel())
+        c.bind("<Escape>", lambda e: on_cancel())
+        try:
+            c.focus_set()
+        except tk.TclError:
+            pass
+
+    def end_measure(self):
+        c = self.canvas
+        for sequence in ("<Button-1>", "<Motion>", "<Button-3>", "<Escape>"):
+            try:
+                c.unbind(sequence)
+            except tk.TclError:
+                pass
+        c.configure(cursor="")
+        c.delete("measure")
+        c.delete("hint")
+
+    def draw_measure(self, x1, y1, x2, y2, label, font):
+        """A span and its readout, drawn to be legible over any map.
+
+        Every mark gets a dark outline under a light fill, because the map
+        underneath is unknown: a plain white line vanishes on snow and a plain
+        black one vanishes in a dungeon.
+        """
+        c = self.canvas
+        c.delete("measure")
+        dark, light = "#000000", "#FFFFFF"
+
+        c.create_line(x1, y1, x2, y2, fill=dark, width=5, tags="measure")
+        c.create_line(x1, y1, x2, y2, fill=light, width=2, tags="measure")
+
+        for x, y in ((x1, y1), (x2, y2)):
+            c.create_oval(x - 6, y - 6, x + 6, y + 6, fill=dark,
+                          outline=light, width=2, tags="measure")
+
+        if not label:
+            return
+
+        # Sit the readout beside the moving end, flipped inward near an edge so
+        # it never runs off the screen being measured.
+        pad = 7
+        probe = c.create_text(0, -200, text=label, anchor="nw", font=font,
+                              tags="measure")
+        bounds = c.bbox(probe)
+        c.delete(probe)
+        text_w = (bounds[2] - bounds[0]) if bounds else 120
+        text_h = (bounds[3] - bounds[1]) if bounds else 16
+
+        tx = x2 + 16
+        ty = y2 - text_h - 16
+        if tx + text_w + pad * 2 > self.width:
+            tx = x2 - text_w - pad * 2 - 16
+        if ty < 0:
+            ty = y2 + 16
+        c.create_rectangle(tx, ty, tx + text_w + pad * 2, ty + text_h + pad * 2,
+                           fill=dark, outline=light, tags="measure")
+        c.create_text(tx + pad, ty + pad, text=label, anchor="nw", fill=light,
+                      font=font, tags="measure")
+
+    # -- range bands -------------------------------------------------------
+
+    def draw_ranges(self, origin, rings, revealed, font, colour="#F5C542"):
+        """Translucent discs around a point, one per band.
+
+        Circles, filled with a stipple so the map still shows through, which is
+        what stops them reading as grid lines. Drawn outermost first so the
+        inner bands stay on top.
+
+        While private the bands carry no text at all: the distances belong in
+        the panel, where only the person running the game is looking. Revealing
+        is what puts a name on the ring, bold enough to read across a table, so
+        a player learns they are Near without anyone saying thirty feet.
+        """
+        c = self.canvas
+        c.delete("ranges")
+        if origin is None or not rings:
+            return
+
+        ox, oy = origin
+        if not HEX_RE.match(str(colour)):
+            colour = "#F5C542"
+        halo = contrast_halo(colour)
+        line = colour if revealed else blend(colour, halo, 0.62)
+        weight = RING_WEIGHT_REVEALED if revealed else RING_WEIGHT_PRIVATE
+
+        for name, radius in sorted(rings, key=lambda pair: -pair[1]):
+            if radius < 5:
+                continue
+            box = (ox - radius, oy - radius, ox + radius, oy + radius)
+            c.create_oval(*box, outline=halo, width=weight + 2, tags="ranges")
+            c.create_oval(*box, outline=line, width=weight, tags="ranges")
+
+        if revealed:
+            for name, radius in rings:
+                if radius < 5:
+                    continue
+                # On the up-right diagonal, so successive bands do not stack
+                # their names on top of one another.
+                lx = min(max(ox + radius * 0.707, 8), max(9, self.width - 8))
+                ly = min(max(oy - radius * 0.707, 8), max(9, self.height - 8))
+                self._range_label(name, lx, ly, font, line, halo)
+
+        # The origin, so it is obvious what the bands are measured from.
+        r = 7 if revealed else 4
+        c.create_oval(ox - r, oy - r, ox + r, oy + r, fill=halo,
+                      outline=line, width=2, tags="ranges")
+
+    def _range_label(self, name, x, y, font, line, halo):
+        c = self.canvas
+        pad = 6
+        probe = c.create_text(0, -300, text=name, anchor="nw", font=font,
+                              tags="ranges")
+        bounds = c.bbox(probe)
+        c.delete(probe)
+        w = (bounds[2] - bounds[0]) if bounds else 60
+        h = (bounds[3] - bounds[1]) if bounds else 14
+        c.create_rectangle(x - w / 2 - pad, y - h / 2 - pad,
+                           x + w / 2 + pad, y + h / 2 + pad,
+                           fill=halo, outline=line, tags="ranges")
+        c.create_text(x, y, text=name, anchor="center", fill=line,
+                      font=font, tags="ranges")
+
+    def clear_ranges(self):
+        self.canvas.delete("ranges")
+
+    def draw_conditions(self, markers, radius, font, font_for=None):
+        """A coloured band on each marked creature, with its name on the band.
+
+        Modelled on the plastic rings that slip over a miniature's base, and
+        borrowing the detail that makes those work: the name is set twice, on
+        opposite sides of the ring, so it reads whether you are sitting at the
+        top of the table or the bottom. On a screen laid flat that matters as
+        much as it does with the physical thing.
+
+        Falls back to a plain label underneath when the ring is too small to
+        carry text, which happens at small cell sizes.
+        """
+        c = self.canvas
+        c.delete("conditions")
+        radius = max(6.0, float(radius))
+        band = max(5.0, radius * 0.46)
+
+        for x, y, name, colour in markers:
+            if not HEX_RE.match(str(colour)):
+                colour = "#FFFFFF"
+            halo = contrast_halo(colour)
+            box = (x - radius, y - radius, x + radius, y + radius)
+            c.create_oval(*box, outline=halo, width=band + 4,
+                          tags="conditions")
+            c.create_oval(*box, outline=colour, width=band, tags="conditions")
+
+            placed = False
+            if font_for is not None and band >= 9 and self.can_rotate_text:
+                placed = self._band_text(x, y, radius, name.upper(), halo,
+                                         font_for, band)
+            if not placed:
+                ly = y + radius + 11
+                if ly > self.height - 8:
+                    ly = y - radius - 11
+                c.create_text(x + 1, ly + 1, text=name, anchor="center",
+                              fill=halo, font=font, tags="conditions")
+                c.create_text(x, ly, text=name, anchor="center", fill=colour,
+                              font=font, tags="conditions")
+
+    def _band_text(self, cx, cy, radius, text, fill, font_for, band):
+        """Set text around the ring, twice, facing opposite ways.
+
+        Each glyph is placed and rotated individually, since a canvas has no
+        notion of text on a path. Returns False if it will not fit, so the
+        caller can fall back.
+        """
+        usable = math.pi * radius * 0.78          # arc available to one copy
+        size = int(band * 0.66)
+        font = None
+        while size >= 7:
+            font = font_for(size)
+            if sum(font.measure(ch) for ch in text) <= usable:
+                break
+            size -= 1
+        else:
+            return False
+
+        widths = [font.measure(ch) for ch in text]
+        total = sum(widths) / float(radius)       # arc length, in radians
+
+        # Both copies are laid out in the same direction. That looks wrong and
+        # is not: the lower one is upside down from here, which puts it the
+        # right way up, and in the right order, for whoever sits opposite.
+        for centre in (-math.pi / 2, math.pi / 2):
+            angle = centre - total / 2
+            for ch, width in zip(text, widths):
+                step = width / float(radius)
+                at = angle + step / 2
+                # A glyph at the top of the ring stands upright, so the
+                # rotation is its arc position turned back by a quarter turn.
+                self.canvas.create_text(
+                    cx + radius * math.cos(at),
+                    cy + radius * math.sin(at),
+                    text=ch, font=font, fill=fill, anchor="center",
+                    angle=-(math.degrees(at) + 90) % 360,
+                    tags="conditions")
+                angle += step
+        return True
+
+    def clear_conditions(self):
+        self.canvas.delete("conditions")
+
     def draw(self, kind, size, off_x, off_y, colour, weight):
         c = self.canvas
         c.delete("grid")
@@ -1228,6 +2229,10 @@ class Overlay:
                                  pointy=(kind == "Hex (pointy top)")):
                 c.create_polygon(pts, outline=colour, fill="", width=weight,
                                  tags="grid")
+        # Redrawing the grid puts its lines at the front of the canvas, which
+        # buried any markers already placed. Everything else belongs on top of
+        # the grid, so the grid is pushed to the back every time it is drawn.
+        c.tag_lower("grid")
 
 
 # ==========================================================================
@@ -1570,6 +2575,8 @@ class SettingsWindow:
         self._build_tab_strip(outer)
         self._add_page("General", self._build_general())
         self._add_page("Hotkeys", self._build_hotkeys())
+        self._add_page("Bands", self._build_bands())
+        self._add_page("Conditions", self._build_conditions())
         self._add_page("Theme", self._build_themes())
         self._select_page(0)
         self._lock_tab_size()
@@ -1889,6 +2896,277 @@ class SettingsWindow:
                  "different keys for the rows marked above."
         )
 
+    # -- Bands tab ---------------------------------------------------------
+
+    def _build_bands(self):
+        pad = self.app._px
+        holder, inner = self._tab()
+
+        self._note(inner,
+                   "A name and a distance for each ring. Distances are in "
+                   "whatever unit the panel is set to, and they are sorted for "
+                   "you, so the order you enter them in does not matter.",
+                   pady=(0, pad(10)))
+
+        # StringVars live in self.band_rows and outlast the widgets, so the grid
+        # can be rebuilt wholesale whenever a row is added or removed without
+        # anyone losing what they were typing.
+        self.band_rows = [
+            {"name": tk.StringVar(value=name),
+             "distance": tk.StringVar(value=tidy_number(distance, 2))}
+            for name, distance in self.app.bands
+        ]
+
+        self.band_grid = ttk.Frame(inner, style="Card.TFrame")
+        self.band_grid.pack(fill="x")
+
+        self.add_band_button = ttk.Button(inner, text="Add a band",
+                                         command=self.add_band_row)
+        self.add_band_button.pack(anchor="w", pady=(pad(10), 0))
+
+        self.band_status = ttk.Label(inner, text="", style="Hint.TLabel",
+                                     justify="left",
+                                     wraplength=self.app._px(430))
+        self.band_status.pack(anchor="w", fill="x", pady=(pad(8), 0))
+
+        buttons = ttk.Frame(inner, style="Card.TFrame")
+        buttons.pack(fill="x", pady=(pad(10), 0))
+        ttk.Button(buttons, text="Apply bands",
+                   command=self.apply_bands).pack(side="right")
+        ttk.Button(buttons, text="Restore defaults",
+                   command=self.restore_bands).pack(side="left")
+
+        self._rebuild_band_rows()
+        return holder
+
+    def _rebuild_band_rows(self):
+        """Redraw the rows. Cheap, and it keeps the columns aligned."""
+        pad = self.app._px
+        for child in self.band_grid.winfo_children():
+            child.destroy()
+        self.band_grid.columnconfigure(0, weight=1)
+
+        unit = self.app.unit.get()
+        heading = "DISTANCE" if unit == "squares" else "DISTANCE (%s)" % unit
+        ttk.Label(self.band_grid, text="NAME", style="Head.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, pad(5)))
+        ttk.Label(self.band_grid, text=heading, style="Head.TLabel").grid(
+            row=0, column=1, sticky="w", padx=(pad(8), 0), pady=(0, pad(5)))
+
+        removable = len(self.band_rows) > 1
+        for index, row in enumerate(self.band_rows, start=1):
+            ttk.Entry(self.band_grid, textvariable=row["name"]).grid(
+                row=index, column=0, sticky="we", pady=pad(2))
+            ttk.Entry(self.band_grid, textvariable=row["distance"],
+                      font=self.app.f_num, width=9, justify="right").grid(
+                row=index, column=1, sticky="w", padx=(pad(8), 0), pady=pad(2))
+            remove = ttk.Button(self.band_grid, text="\u00d7", width=3,
+                                command=lambda r=row: self.remove_band_row(r))
+            remove.grid(row=index, column=2, padx=(pad(6), 0), pady=pad(2))
+            if not removable:
+                remove.state(["disabled"])       # never leave the list empty
+
+        full = len(self.band_rows) >= MAX_BANDS
+        self.add_band_button.state(["disabled"] if full else ["!disabled"])
+        if full:
+            self.band_status.configure(
+                text="%d bands is as many as stays readable on a map."
+                     % MAX_BANDS)
+
+    def add_band_row(self):
+        if len(self.band_rows) >= MAX_BANDS:
+            return
+        self.band_rows.append({"name": tk.StringVar(value=""),
+                               "distance": tk.StringVar(value="")})
+        self._rebuild_band_rows()
+        self.band_status.configure(text="Fill the new row, then Apply bands.")
+
+    def remove_band_row(self, row):
+        if len(self.band_rows) <= 1:
+            return
+        self.band_rows.remove(row)
+        self._rebuild_band_rows()
+        self.band_status.configure(text="Choose Apply bands to confirm.")
+
+    def apply_bands(self):
+        rows = [(row["name"].get(), row["distance"].get())
+                for row in self.band_rows]
+        error = self.app.set_bands(rows)
+        if error:
+            self.band_status.configure(text=error)
+            return
+        # Reload from what was accepted, so the rows show the sorted order and
+        # the tidied numbers rather than whatever was typed.
+        self.band_rows = [
+            {"name": tk.StringVar(value=name),
+             "distance": tk.StringVar(value=tidy_number(distance, 2))}
+            for name, distance in self.app.bands
+        ]
+        self._rebuild_band_rows()
+        self.band_status.configure(
+            text="%d bands in use." % len(self.app.bands))
+
+    def restore_bands(self):
+        self.band_rows = [
+            {"name": tk.StringVar(value=name),
+             "distance": tk.StringVar(value=tidy_number(distance, 2))}
+            for name, distance in DEFAULT_BANDS
+        ]
+        self._rebuild_band_rows()
+        self.band_status.configure(
+            text="Defaults restored. Choose Apply bands to use them.")
+
+    # -- Conditions tab ----------------------------------------------------
+
+    def _build_conditions(self):
+        pad = self.app._px
+        holder, inner = self._tab()
+
+        self._note(inner,
+                   "A name and a colour for each condition. Click a swatch to "
+                   "change it. Markers already on the map follow any change you "
+                   "make here.",
+                   pady=(0, pad(10)))
+
+        self.cond_rows = [
+            {"name": tk.StringVar(value=name),
+             "colour": tk.StringVar(value=colour)}
+            for name, colour in self.app.conditions
+        ]
+
+        self.cond_grid = ttk.Frame(inner, style="Card.TFrame")
+        self.cond_grid.pack(fill="x")
+
+        self.add_cond_button = ttk.Button(inner, text="Add a condition",
+                                         command=self.add_cond_row)
+        self.add_cond_button.pack(anchor="w", pady=(pad(10), 0))
+
+        self.cond_status = ttk.Label(inner, text="", style="Hint.TLabel",
+                                     justify="left",
+                                     wraplength=self.app._px(430))
+        self.cond_status.pack(anchor="w", fill="x", pady=(pad(8), 0))
+
+        buttons = ttk.Frame(inner, style="Card.TFrame")
+        buttons.pack(fill="x", pady=(pad(10), 0))
+        ttk.Button(buttons, text="Apply conditions",
+                   command=self.apply_conditions).pack(side="right")
+        ttk.Button(buttons, text="Restore defaults",
+                   command=self.restore_conditions).pack(side="left")
+
+        self._rebuild_cond_rows()
+        return holder
+
+    def _rebuild_cond_rows(self):
+        """Two columns. The full condition list in one would run off a screen."""
+        pad = self.app._px
+        for child in self.cond_grid.winfo_children():
+            child.destroy()
+
+        columns = 2 if len(self.cond_rows) > 8 else 1
+        for column in range(columns):
+            self.cond_grid.columnconfigure(column * 4, weight=1)
+
+        for column in range(columns):
+            left = column * 4
+            ttk.Label(self.cond_grid, text="NAME", style="Head.TLabel").grid(
+                row=0, column=left, sticky="w", pady=(0, pad(5)),
+                padx=(pad(12) if column else 0, 0))
+            ttk.Label(self.cond_grid, text="COLOUR",
+                      style="Head.TLabel").grid(
+                row=0, column=left + 1, sticky="w", padx=(pad(8), 0),
+                pady=(0, pad(5)))
+
+        per_column = -(-len(self.cond_rows) // columns)     # round up
+        removable = len(self.cond_rows) > 1
+        for index, row in enumerate(self.cond_rows):
+            column = index // per_column
+            left = column * 4
+            line = index % per_column + 1
+
+            ttk.Entry(self.cond_grid, textvariable=row["name"],
+                      width=16).grid(
+                row=line, column=left, sticky="we", pady=pad(2),
+                padx=(pad(12) if column else 0, 0))
+
+            swatch = tk.Canvas(self.cond_grid, width=pad(40), height=pad(18),
+                               highlightthickness=1, bd=0, takefocus=0,
+                               cursor="hand2")
+            swatch.grid(row=line, column=left + 1, sticky="w",
+                        padx=(pad(8), 0), pady=pad(2))
+            self._paint_cond_swatch(swatch, row["colour"].get())
+            swatch.bind("<Button-1>",
+                        lambda e, r=row, s=swatch: self.pick_cond_colour(r, s))
+
+            remove = ttk.Button(self.cond_grid, text="\u00d7", width=3,
+                                command=lambda r=row: self.remove_cond_row(r))
+            remove.grid(row=line, column=left + 2, padx=(pad(5), 0),
+                        pady=pad(2))
+            if not removable:
+                remove.state(["disabled"])
+
+        full = len(self.cond_rows) >= MAX_CONDITIONS
+        self.add_cond_button.state(["disabled"] if full else ["!disabled"])
+        if full:
+            self.cond_status.configure(
+                text="%d conditions is as many as fits." % MAX_CONDITIONS)
+
+    def _paint_cond_swatch(self, swatch, colour):
+        try:
+            swatch.configure(bg=colour if HEX_RE.match(str(colour)) else "#808080",
+                             highlightbackground=LINE)
+        except tk.TclError:
+            swatch.configure(bg="#808080", highlightbackground=LINE)
+
+    def pick_cond_colour(self, row, swatch):
+        chosen = ColourPicker(self.app, self.win, row["colour"].get(),
+                              "Colour for %s" % (row["name"].get() or "condition")
+                              ).show()
+        if chosen:
+            row["colour"].set(chosen)
+            self._paint_cond_swatch(swatch, chosen)
+
+    def add_cond_row(self):
+        if len(self.cond_rows) >= MAX_CONDITIONS:
+            return
+        self.cond_rows.append({"name": tk.StringVar(value=""),
+                               "colour": tk.StringVar(value="#FFFFFF")})
+        self._rebuild_cond_rows()
+        self.cond_status.configure(
+            text="Name the new row, pick a colour, then Apply conditions.")
+
+    def remove_cond_row(self, row):
+        if len(self.cond_rows) <= 1:
+            return
+        self.cond_rows.remove(row)
+        self._rebuild_cond_rows()
+        self.cond_status.configure(text="Choose Apply conditions to confirm.")
+
+    def apply_conditions(self):
+        rows = [(row["name"].get(), row["colour"].get())
+                for row in self.cond_rows]
+        error = self.app.set_conditions(rows)
+        if error:
+            self.cond_status.configure(text=error)
+            return
+        self.cond_rows = [
+            {"name": tk.StringVar(value=name),
+             "colour": tk.StringVar(value=colour)}
+            for name, colour in self.app.conditions
+        ]
+        self._rebuild_cond_rows()
+        self.cond_status.configure(
+            text="%d conditions in use." % len(self.app.conditions))
+
+    def restore_conditions(self):
+        self.cond_rows = [
+            {"name": tk.StringVar(value=name),
+             "colour": tk.StringVar(value=colour)}
+            for name, colour in DEFAULT_CONDITIONS
+        ]
+        self._rebuild_cond_rows()
+        self.cond_status.configure(
+            text="Defaults restored. Choose Apply conditions to use them.")
+
     # -- Theme tab ---------------------------------------------------------
 
     def _build_themes(self):
@@ -2085,6 +3363,9 @@ class App:
 
     def __init__(self):
         hide_own_console()
+        # Before any window exists, or the taskbar groups this under whatever
+        # launched it and shows that program's icon.
+        claim_taskbar_identity()
         self._fault_log = enable_fault_log()
         log_event("---- start  pid=%s  frozen=%s  python=%s"
                   % (os.getpid(), bool(getattr(sys, "frozen", False)),
@@ -2116,6 +3397,7 @@ class App:
         apply_palette(resolve_theme(self.theme_name, self.custom_theme))
         self.root.configure(bg=INK)
         self._combos = []
+        self._swatch_strips = []
         self.start_minimised = tk.BooleanVar(
             value=bool(saved.get("start_minimised", False))
         )
@@ -2139,6 +3421,44 @@ class App:
         )
         self.visible = tk.BooleanVar(value=bool(self.overlay_on_start.get()))
         self.click_through = tk.BooleanVar(value=saved.get("click_through", True))
+        self.per_square = tk.DoubleVar(value=saved.get("per_square", 5.0))
+        self.unit = tk.StringVar(value=saved.get("unit", "ft"))
+        self.diagonal_rule = tk.StringVar(
+            value=saved.get("diagonal_rule", DIAGONAL_RULES[0]))
+        if self.diagonal_rule.get() not in DIAGONAL_RULES:
+            self.diagonal_rule.set(DIAGONAL_RULES[0])
+        if self.unit.get() not in UNIT_CHOICES:
+            self.unit.set("ft")
+        self.measure_readout = tk.StringVar(value="")
+        self.span_squares = tk.StringVar(value="")
+        self.measure = None                      # None, or the span in progress
+        self.bands, _error = parse_bands(saved.get("bands", "")) or (None, "")
+        if not self.bands:
+            self.bands = [list(pair) for pair in DEFAULT_BANDS]
+        self.range_mode = tk.StringVar(value=saved.get("range_mode", "DM only"))
+        if self.range_mode.get() not in RANGE_MODES:
+            self.range_mode.set("DM only")
+        self.band_colour = tk.StringVar(
+            value=saved.get("band_colour", "#F5C542"))
+        self.range_readout = tk.StringVar(value="")
+        self.band_summary = tk.StringVar(value="")
+        self.range_origin = None
+        self.placing_ranges = False
+        self.revealing = False
+        self.conditions = normalise_conditions(
+            saved.get("conditions", ""), saved.get("conditions_version", 0))
+        self.condition_choice = tk.StringVar(value=self.conditions[0][0])
+        # Markers are held in grid coordinates, not pixels. A marker sits on a
+        # creature standing in a square, so when the grid is rescaled or nudged
+        # into alignment the marker has to travel with its square rather than
+        # staying at a pixel the square has moved away from.
+        self.markers = []
+        self.marker_size = tk.IntVar(value=saved.get("marker_size", 84))
+        self.placing_condition = False
+        self._ring_fonts = {}
+        self._measure_timer = None
+        self._measure_restore = True
+
         self.status = tk.StringVar(value="Overlay live")
         self.hotkey_hint = tk.StringVar(value="")
 
@@ -2168,6 +3488,16 @@ class App:
         for var in (self.grid_type, self.cell, self.off_x, self.off_y,
                     self.line_w, self.colour):
             var.trace_add("write", lambda *_: self.schedule_draw())
+        for var in (self.per_square, self.unit, self.diagonal_rule):
+            var.trace_add("write", lambda *_: self.measure_readout.set(""))
+        for var in (self.per_square, self.diagonal_rule, self.cell,
+                    self.range_mode, self.band_colour):
+            var.trace_add("write", lambda *_: self._paint_ranges())
+        for var in (self.cell, self.off_x, self.off_y, self.marker_size,
+                    self.grid_type):
+            var.trace_add("write", lambda *_: self._paint_conditions())
+        self.band_colour.trace_add("write", lambda *_: self._paint_swatches())
+        self.unit.trace_add("write", lambda *_: self._refresh_band_summary())
         self.opacity.trace_add("write", lambda *_: self.apply_opacity())
 
         self.apply_screen()
@@ -2556,6 +3886,159 @@ class App:
         self._value_row(align, "Offset X", self.off_x, -400, 400, 0.5, "px")
         self._value_row(align, "Offset Y", self.off_y, -400, 400, 0.5, "px")
 
+        # scale ----------------------------------------------------------
+        scale_card = self._card(shell, "SCALE")
+
+        per_row = ttk.Frame(scale_card, style="Card.TFrame")
+        per_row.pack(fill="x")
+        ttk.Label(per_row, text="1 square =", style="TLabel", width=9,
+                  anchor="w").pack(side="left")
+        ttk.Entry(per_row, textvariable=self.per_square, font=self.f_num,
+                  width=6, justify="right").pack(side="left",
+                                                 padx=(self._px(6), 0))
+        self.register_combo(ttk.Combobox(
+            per_row, values=list(UNIT_CHOICES), textvariable=self.unit,
+            state="readonly", width=8)).pack(side="left",
+                                             padx=(self._px(6), 0))
+
+        diag_row = ttk.Frame(scale_card, style="Card.TFrame")
+        diag_row.pack(fill="x", pady=(self._px(6), 0))
+        ttk.Label(diag_row, text="Diagonals", style="TLabel", width=9,
+                  anchor="w").pack(side="left")
+        self.register_combo(ttk.Combobox(
+            diag_row, values=list(DIAGONAL_RULES),
+            textvariable=self.diagonal_rule, state="readonly")).pack(
+            side="left", fill="x", expand=True, padx=(self._px(6), 0))
+
+        measure_row = ttk.Frame(scale_card, style="Card.TFrame")
+        measure_row.pack(fill="x", pady=(self._px(8), 0))
+        self.measure_button = ttk.Button(measure_row, text="Measure\u2026",
+                                        command=self.toggle_measure)
+        self.measure_button.pack(side="left")
+        self._wrapping(ttk.Label(
+            measure_row, textvariable=self.measure_readout, style="Hint.TLabel",
+            justify="left",
+        ), reserve=self._px(96)).pack(side="left", fill="x", expand=True,
+                                      padx=(self._px(8), 0))
+
+        # Only shown once a span has been measured.
+        self.span_row = ttk.Frame(scale_card, style="Card.TFrame")
+        ttk.Label(self.span_row, text="That span was", style="TLabel").pack(
+            side="left")
+        ttk.Entry(self.span_row, textvariable=self.span_squares,
+                  font=self.f_num, width=5, justify="right").pack(
+            side="left", padx=(self._px(6), self._px(6)))
+        ttk.Label(self.span_row, text="squares", style="TLabel").pack(
+            side="left")
+        ttk.Button(self.span_row, text="Set cell size",
+                   command=self.apply_span_as_cell_size).pack(
+            side="right")
+
+        self._wrapping(ttk.Label(
+            scale_card,
+            text="Click two points on the map, then say how many squares they "
+                 "were apart. Hold Shift while measuring to lock the line to "
+                 "horizontal or vertical, which is worth doing when setting the "
+                 "cell size. The screen dims while measuring, because the "
+                 "overlay has to hold the mouse; right-click to cancel.",
+            style="Hint.TLabel", justify="left",
+        )).pack(anchor="w", fill="x", pady=(self._px(6), 0))
+
+        # range bands ----------------------------------------------------
+        range_card = self._card(shell, "RANGE BANDS")
+
+        mode_row = ttk.Frame(range_card, style="Card.TFrame")
+        mode_row.pack(fill="x")
+        ttk.Label(mode_row, text="Show", style="TLabel", width=9,
+                  anchor="w").pack(side="left")
+        self.register_combo(ttk.Combobox(
+            mode_row, values=list(RANGE_MODES), textvariable=self.range_mode,
+            state="readonly")).pack(side="left", fill="x", expand=True,
+                                    padx=(self._px(6), 0))
+
+        band_colour_row = ttk.Frame(range_card, style="Card.TFrame")
+        band_colour_row.pack(fill="x", pady=(self._px(8), 0))
+        ttk.Label(band_colour_row, text="Colour", style="TLabel", width=9,
+                  anchor="w").pack(side="left")
+        ttk.Button(band_colour_row, text="Pick\u2026",
+                   command=self.pick_band_colour).pack(side="right")
+        self.add_swatch_strip(band_colour_row, self.band_colour,
+                              self.pick_band_colour).pack(
+            side="left", fill="x", expand=True,
+            padx=(self._px(6), self._px(6)))
+
+        band_buttons = ttk.Frame(range_card, style="Card.TFrame")
+        band_buttons.pack(fill="x", pady=(self._px(8), 0))
+        self.range_button = ttk.Button(band_buttons, text="Place bands\u2026",
+                                      command=self.toggle_place_ranges)
+        self.range_button.pack(side="left")
+        ttk.Button(band_buttons, text="Clear",
+                   command=self.clear_ranges).pack(side="left",
+                                                   padx=(self._px(6), 0))
+        # The hotkey can be refused by Windows if another program owns the
+        # combination, so revealing is reachable from the panel too.
+        reveal = ttk.Button(band_buttons, text="Reveal")
+        reveal.pack(side="left", padx=(self._px(6), 0))
+        reveal.bind("<ButtonPress-1>", lambda e: self.hold_reveal(True))
+        reveal.bind("<ButtonRelease-1>", lambda e: self.hold_reveal(False))
+        self._wrapping(ttk.Label(
+            band_buttons, textvariable=self.range_readout, style="Hint.TLabel",
+            justify="left",
+        ), reserve=self._px(150)).pack(side="left", fill="x", expand=True,
+                                      padx=(self._px(8), 0))
+
+        self._wrapping(ttk.Label(
+            range_card, textvariable=self.band_summary, style="TLabel",
+            justify="left",
+        )).pack(anchor="w", fill="x", pady=(self._px(8), 0))
+
+        self._wrapping(ttk.Label(
+            range_card,
+            text="Click a creature and thin rings appear around it, unlabelled. "
+                 "The distances are listed above, for you. Hold the reveal key "
+                 "and the rings thicken and take names, for the table. Rings "
+                 "scale with the cell size, and any that would be wider than "
+                 "the screen are left out. Edit the bands under Settings.",
+            style="Hint.TLabel", justify="left",
+        )).pack(anchor="w", fill="x", pady=(self._px(6), 0))
+
+        # conditions -----------------------------------------------------
+        cond_card = self._card(shell, "CONDITIONS")
+
+        pick_row = ttk.Frame(cond_card, style="Card.TFrame")
+        pick_row.pack(fill="x")
+        ttk.Label(pick_row, text="Mark as", style="TLabel", width=9,
+                  anchor="w").pack(side="left")
+        self.condition_box = self.register_combo(ttk.Combobox(
+            pick_row, values=[name for name, _c in self.conditions],
+            textvariable=self.condition_choice, state="readonly"))
+        self.condition_box.pack(side="left", fill="x", expand=True,
+                                padx=(self._px(6), 0))
+
+        self._value_row(cond_card, "Size", self.marker_size, 20, 250, 5, "%")
+
+        cond_buttons = ttk.Frame(cond_card, style="Card.TFrame")
+        cond_buttons.pack(fill="x", pady=(self._px(8), 0))
+        self.condition_button = ttk.Button(cond_buttons, text="Mark\u2026",
+                                         command=self.toggle_place_condition)
+        self.condition_button.pack(side="left")
+        ttk.Button(cond_buttons, text="Undo",
+                   command=self.undo_condition).pack(side="left",
+                                                     padx=(self._px(6), 0))
+        ttk.Button(cond_buttons, text="Clear all",
+                   command=self.clear_conditions).pack(side="left",
+                                                       padx=(self._px(6), 0))
+
+        self._wrapping(ttk.Label(
+            cond_card,
+            text="A coloured ring on a creature saying what is happening to it. "
+                 "Keep clicking to mark a whole group, then right-click when "
+                 "done. Size is a share of one square, so rings stay "
+                 "proportionate, and they hold their place on the grid if you "
+                 "rescale or nudge it. Edit the list under Settings.",
+            style="Hint.TLabel", justify="left",
+        )).pack(anchor="w", fill="x", pady=(self._px(6), 0))
+
         # lines ----------------------------------------------------------
         lines = self._card(shell, "LINES")
         swatch_row = ttk.Frame(lines, style="Card.TFrame")
@@ -2564,14 +4047,9 @@ class App:
                   anchor="w").pack(side="left")
         ttk.Button(swatch_row, text="Pick\u2026",
                    command=self.pick_colour).pack(side="right")
-        self.swatches = tk.Canvas(
-            swatch_row, height=self._px(20), bg=PANEL, highlightthickness=0,
-            bd=0, takefocus=0, cursor="hand2",
-        )
-        self.swatches.pack(side="left", fill="x", expand=True,
-                           padx=(self._px(6), self._px(6)))
-        self.swatches.bind("<Button-1>", self._swatch_click)
-        self.swatches.bind("<Configure>", lambda e: self._paint_swatches())
+        self.add_swatch_strip(swatch_row, self.colour, self.pick_colour).pack(
+            side="left", fill="x", expand=True,
+            padx=(self._px(6), self._px(6)))
         ttk.Label(lines, text="First swatch is the colour in use \u2014 click it "
                               "to change. The rest are presets.",
                   style="Hint.TLabel").pack(anchor="w", pady=(self._px(4), 0))
@@ -2618,8 +4096,7 @@ class App:
         self._wrapping(ttk.Label(
             hints,
             text="Arrows nudge  \u00b7  Shift+arrows \u00d710  \u00b7  "
-                 "+ / \u2212 cell size  \u00b7  [ ] fine  \u00b7  "
-                 "H show or hide",
+                 "+ / \u2212 cell size  \u00b7  [ ] fine",
             style="Shell.TLabel", justify="left",
         ), reserve=self._px(160)).pack(anchor="w", fill="x")
         self._wrapping(ttk.Label(
@@ -2630,6 +4107,7 @@ class App:
 
         self._paint_lamp()
         self._update_backdrop_label()
+        self._refresh_band_summary()
 
     # -- scrolling ---------------------------------------------------------
 
@@ -2742,10 +4220,432 @@ class App:
         self._apply_layout_mode()
         self._rewrap()
 
+    # -- measuring ---------------------------------------------------------
+
+    def toggle_measure(self):
+        if self.measure is not None:
+            self.cancel_measure("Measuring cancelled")
+        else:
+            self.start_measure()
+
+    def start_measure(self):
+        """Begin a span. The overlay must be visible to be measured on."""
+        if not self.visible.get():
+            self.visible.set(True)
+            self.apply_visibility()
+
+        self.measure = {"first": None, "last": None, "snapped": False}
+        self._measure_restore = bool(self.click_through.get())
+        # Both are needed: the extended style stops the window being skipped,
+        # and dropping the colour key gives it pixels that can actually be hit.
+        self.overlay.set_click_through(False)
+        self.overlay.set_measure_surface(True)
+        self.overlay.begin_measure(self._measure_click, self._measure_move,
+                                   lambda: self.cancel_measure(
+                                       "Measuring cancelled"))
+        self.overlay.show_measure_hint(
+            "Click two points to measure     hold Shift to keep it straight"
+            "     right-click to cancel", self.f_num)
+        self.schedule_draw()                     # redraw the grid on the wash
+        self.measure_button.configure(text="Cancel")
+        self.span_row.pack_forget()
+        self.measure_readout.set("Click the first point on the map")
+        self.status.set("Measuring")
+        self._arm_measure_timeout()
+        log_event("measure: started")
+
+    def _arm_measure_timeout(self):
+        """Nothing may leave the screen permanently unclickable.
+
+        If measuring is somehow abandoned, this ends it on its own rather than
+        leaving an invisible sheet swallowing every click.
+        """
+        if self._measure_timer is not None:
+            try:
+                self.root.after_cancel(self._measure_timer)
+            except Exception:
+                pass
+        self._measure_timer = self.root.after(
+            30000, lambda: self.cancel_measure("Measuring timed out"))
+
+    def _measure_move(self, x, y, state=0):
+        if self.measure is None or self.measure["first"] is None:
+            return
+        self._arm_measure_timeout()
+        x1, y1 = self.measure["first"]
+        if state & SHIFT_HELD:
+            x2, y2, snapped = snap_to_axis(x1, y1, x, y)
+        else:
+            x2, y2, snapped = x, y, False
+        self.measure["last"] = (x2, y2)
+        self.measure["snapped"] = snapped
+        self.overlay.draw_measure(x1, y1, x2, y2, self._span_label(x1, y1, x2, y2),
+                                  self.f_num)
+
+    def _measure_click(self, x, y):
+        if self.measure is None:
+            return
+        self._arm_measure_timeout()
+        if self.measure["first"] is None:
+            self.measure["first"] = (x, y)
+            self.measure_readout.set("Now click the far point")
+            self.overlay.draw_measure(x, y, x, y, "", self.f_num)
+            return
+        self._finish_measure()
+
+    def _span_label(self, x1, y1, x2, y2):
+        text = format_measurement(
+            x2 - x1, y2 - y1, max(1.0, safe_float(self.cell, 64.0)),
+            self.diagonal_rule.get(), safe_float(self.per_square, 5.0),
+            self.unit.get())
+        return text + ("   straight" if self.measure["snapped"] else "")
+
+    def _finish_measure(self):
+        first, last = self.measure["first"], self.measure["last"]
+        if first is None or last is None:
+            self.cancel_measure("Measuring cancelled")
+            return
+        dx, dy = last[0] - first[0], last[1] - first[1]
+        self._release_measure()
+        self.last_span = (dx, dy)
+        self.measure_readout.set(format_measurement(
+            dx, dy, max(1.0, safe_float(self.cell, 64.0)),
+            self.diagonal_rule.get(), safe_float(self.per_square, 5.0),
+            self.unit.get()))
+        self.span_row.pack(fill="x", pady=(self._px(6), 0))
+        self.status.set("Overlay live" if self.visible.get() else "Overlay hidden")
+        log_event("measure: %d x %d px" % (round(dx), round(dy)))
+
+    def cancel_measure(self, message=""):
+        self._release_measure()
+        self.overlay.canvas.delete("measure")
+        self.measure_readout.set(message)
+        self.span_row.pack_forget()
+        self.status.set("Overlay live" if self.visible.get() else "Overlay hidden")
+
+    def _release_measure(self):
+        """Give the mouse back. Called on every exit path, without exception."""
+        self.measure = None
+        if self._measure_timer is not None:
+            try:
+                self.root.after_cancel(self._measure_timer)
+            except Exception:
+                pass
+            self._measure_timer = None
+        try:
+            self.overlay.end_measure()
+        finally:
+            # Order matters: put the surface back before handing the mouse
+            # over, so there is no moment where the overlay is both opaque and
+            # ignoring clicks.
+            self.overlay.set_measure_surface(False)
+            self.apply_opacity()
+            self.overlay.set_click_through(self._measure_restore)
+            self.schedule_draw()
+        self.placing_ranges = False
+        self.placing_condition = False
+        try:
+            self.measure_button.configure(text="Measure\u2026")
+            self.range_button.configure(text="Place bands\u2026")
+            self.condition_button.configure(text="Mark\u2026")
+        except (tk.TclError, AttributeError):
+            pass
+
+    def apply_span_as_cell_size(self):
+        """Turn the measured span into a cell size."""
+        span = getattr(self, "last_span", None)
+        if span is None:
+            return
+        size = cell_size_from_span(span[0], span[1], self.span_squares.get())
+        if size is None:
+            self.measure_readout.set(
+                "Give the number of squares that span covered, as a plain "
+                "number")
+            return
+        self.cell.set(size)
+        self.measure_readout.set("Cell size set to %s px" % tidy_number(size, 2))
+        self.span_row.pack_forget()
+        self.overlay.canvas.delete("measure")
+        log_event("measure: cell size set to %s" % size)
+
+    # -- range bands -------------------------------------------------------
+
+    def toggle_place_ranges(self):
+        if self.placing_ranges:
+            self.cancel_measure("")
+        else:
+            self.start_place_ranges()
+
+    def start_place_ranges(self):
+        """One click, then the mouse goes straight back.
+
+        This is the whole reason bands work here and dragging tokens would not.
+        A token needs the pointer for as long as you move it, which would mean
+        surrendering click-through for the session. A band needs it once.
+        """
+        if not self.visible.get():
+            self.visible.set(True)
+            self.apply_visibility()
+        self.placing_ranges = True
+        self._measure_restore = bool(self.click_through.get())
+        self.overlay.set_click_through(False)
+        self.overlay.set_measure_surface(True)
+        self.overlay.begin_measure(self._range_click, self._range_move,
+                                   lambda: self.cancel_measure(""))
+        self.overlay.show_measure_hint(
+            "Click the creature to centre the bands on"
+            "     right-click to cancel", self.f_num)
+        self.range_button.configure(text="Cancel")
+        self.range_readout.set("Click a point on the map")
+        self.schedule_draw()
+        self._arm_measure_timeout()
+        log_event("ranges: placing")
+
+    def _range_move(self, x, y, state=0):
+        """Preview the bands under the cursor before committing to a spot."""
+        self._arm_measure_timeout()
+        self._paint_ranges((x, y), force=True)
+
+    def _range_click(self, x, y):
+        self.range_origin = (x, y)
+        self._release_measure()
+        self._paint_ranges()
+        reveal = hotkey_text(self.hotkeys.get("reveal_ranges"))
+        self.range_readout.set(
+            "Bands placed. Hold %s to show them." % reveal
+            if reveal != "not set" else "Bands placed.")
+        log_event("ranges: placed at %d,%d" % (x, y))
+
+    def clear_ranges(self):
+        self.range_origin = None
+        self.overlay.clear_ranges()
+        self.range_readout.set("")
+
+    def _paint_ranges(self, origin=None, force=False):
+        """Draw the bands, or clear them if there is nothing to show."""
+        origin = origin or self.range_origin
+        mode = self.range_mode.get()
+        if origin is None or (mode == "Off" and not force):
+            self.overlay.clear_ranges()
+            return
+        rings = band_radii(self.bands,
+                           max(1.0, safe_float(self.cell, 64.0)),
+                           max(0.01, safe_float(self.per_square, 5.0)))
+        rings, too_big = visible_rings(rings, self.overlay.width,
+                                       self.overlay.height)
+        revealed = self.revealing or mode == "Show players"
+        self.overlay.draw_ranges(origin, rings, revealed, self.f_num,
+                                 self.band_colour.get())
+        if too_big:
+            self.range_readout.set(
+                "Too wide for this screen: %s. Lower the cell size or the "
+                "distance." % ", ".join(too_big))
+
+    def set_bands(self, rows):
+        """Take name and distance pairs from the editor.
+
+        Returns an error message, or empty when the bands were accepted.
+        """
+        bands, error = validate_bands(rows)
+        if not bands:
+            return error
+        self.bands = [list(pair) for pair in bands]
+        self._refresh_band_summary()
+        self._paint_ranges()
+        return ""
+
+    # -- conditions --------------------------------------------------------
+
+    def _grid_from_pixels(self, x, y):
+        cell = max(1.0, safe_float(self.cell, 64.0))
+        return ((x - safe_float(self.off_x)) / cell,
+                (y - safe_float(self.off_y)) / cell)
+
+    def _pixels_from_grid(self, gx, gy):
+        cell = max(1.0, safe_float(self.cell, 64.0))
+        return (gx * cell + safe_float(self.off_x),
+                gy * cell + safe_float(self.off_y))
+
+    def marker_radius(self):
+        """Half the marker's width, as a share of a cell.
+
+        Sized against the grid so a marker stays proportionate to a creature,
+        but with its own control, because how big a ring should be is a matter
+        of taste rather than arithmetic.
+        """
+        footprint = cell_footprint(self.grid_type.get(),
+                                   max(1.0, safe_float(self.cell, 64.0)))
+        percent = min(300.0, max(10.0, safe_float(self.marker_size, 84)))
+        return footprint * percent / 200.0
+
+    def condition_colour(self, name):
+        for label, colour in self.conditions:
+            if label == name:
+                return colour
+        return "#FFFFFF"
+
+    def toggle_place_condition(self):
+        if self.placing_condition:
+            self.cancel_measure("")
+        else:
+            self.start_place_condition()
+
+    def start_place_condition(self):
+        if not self.visible.get():
+            self.visible.set(True)
+            self.apply_visibility()
+        name = self.condition_choice.get()
+        self.placing_condition = True
+        self._measure_restore = bool(self.click_through.get())
+        self.overlay.set_click_through(False)
+        self.overlay.set_measure_surface(True)
+        self.overlay.begin_measure(self._condition_click, self._condition_move,
+                                   lambda: self.cancel_measure(""))
+        self.overlay.show_measure_hint(
+            "Click each creature that is %s     right-click when done" % name,
+            self.f_num)
+        self.condition_button.configure(text="Done")
+        self.schedule_draw()
+        self._arm_measure_timeout()
+        log_event("conditions: placing %s" % name)
+
+    def _condition_move(self, x, y, state=0):
+        self._arm_measure_timeout()
+
+    def _condition_click(self, x, y):
+        """Stays in placing mode, so a whole group can be marked in one go."""
+        name = self.condition_choice.get()
+        gx, gy = self._grid_from_pixels(x, y)
+        self.markers.append((gx, gy, name, self.condition_colour(name)))
+        self._arm_measure_timeout()
+        self._paint_conditions()
+        self.range_readout.set("%d marked" % len(self.markers))
+
+    def clear_conditions(self):
+        self.markers = []
+        self.overlay.clear_conditions()
+
+    def undo_condition(self):
+        if self.markers:
+            self.markers.pop()
+            self._paint_conditions()
+
+    def _ring_font(self, size):
+        """Bold text sized in pixels, so it can be fitted to the band exactly."""
+        font = self._ring_fonts.get(size)
+        if font is None:
+            font = tkfont.Font(family=self.f_hint.actual("family"),
+                               size=-size, weight="bold")
+            self._ring_fonts[size] = font
+        return font
+
+    def _paint_conditions(self):
+        if not self.markers:
+            self.overlay.clear_conditions()
+            return
+        placed = [self._pixels_from_grid(gx, gy) + (name, colour)
+                  for gx, gy, name, colour in self.markers]
+        self.overlay.draw_conditions(placed, self.marker_radius(),
+                                     self.f_num, self._ring_font)
+
+    def set_conditions(self, rows):
+        """Returns an error message, or empty when they were accepted."""
+        conditions, error = validate_conditions(rows)
+        if not conditions:
+            return error
+        self.conditions = [list(pair) for pair in conditions]
+        names = [name for name, _colour in self.conditions]
+        self.condition_box.configure(values=names)
+        if self.condition_choice.get() not in names:
+            self.condition_choice.set(names[0])
+        # Markers already on the map follow any colour or name change.
+        self.markers = [(gx, gy, name, self.condition_colour(name))
+                        for gx, gy, name, _old in self.markers
+                        if name in names]
+        self._paint_conditions()
+        return ""
+
+    # -- hold to reveal ----------------------------------------------------
+
+    def reveal_ranges(self):
+        """Show the bands boldly for as long as the key is held.
+
+        Windows reports a hotkey being pressed but never released, so the key is
+        polled until it lifts. Holding rather than toggling means there is no
+        state to lose track of mid-combat.
+
+        A tap is held for MIN_REVEAL_MS regardless. Without that floor, pressing
+        and letting go quickly showed the names for a single frame, which looks
+        exactly like the feature not working.
+        """
+        if self.range_origin is None:
+            self.range_readout.set("Place the bands first")
+            return
+        if self.revealing:
+            self._reveal_since = time.monotonic()   # a re-press extends it
+            return
+        self.revealing = True
+        self._reveal_since = time.monotonic()
+        self._paint_ranges()
+        self._watch_reveal_key()
+
+    def _reveal_vk(self):
+        pair = self.hotkeys.get("reveal_ranges") or [HOTKEY_OFF, ""]
+        if pair[0] == HOTKEY_OFF:
+            return None
+        return VK_MAP.get(pair[1])
+
+    def _watch_reveal_key(self):
+        if not self.revealing:
+            return
+        vk = self._reveal_vk()
+        if vk is None or not IS_WINDOWS:
+            # Without the key to watch, fall back to a brief reveal.
+            self.root.after(900, self._end_reveal)
+            return
+        try:
+            down = ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000
+        except Exception:
+            down = 0
+        if down:
+            self.root.after(40, self._watch_reveal_key)
+        else:
+            self._end_reveal()
+
+    def _end_reveal(self):
+        if not self.revealing:
+            return
+        held = (time.monotonic() - getattr(self, "_reveal_since", 0)) * 1000
+        if held < MIN_REVEAL_MS:
+            # Too brief to see. Hold it, then check again.
+            self.root.after(int(MIN_REVEAL_MS - held), self._end_reveal)
+            return
+        self.revealing = False
+        self._paint_ranges()
+
+    def hold_reveal(self, pressed):
+        """The panel button, for revealing without the hotkey."""
+        if pressed:
+            self.reveal_ranges()
+        else:
+            self._end_reveal()
+
     # -- window icon -------------------------------------------------------
 
     def _set_window_icon(self):
-        """Put the Gridwyrm mark in the title bar and on the taskbar button."""
+        """Put the Gridwyrm mark on every surface Windows draws it on.
+
+        There are three, and they are fed separately, which is why getting one
+        right does not get the others:
+
+          the .exe file      PyInstaller's --icon, at build time
+          the title bar      iconphoto, from images held in memory
+          the taskbar button iconbitmap, which insists on a real file path
+
+        So the embedded PNGs are reassembled into an .ico in the temporary
+        folder and pointed at. Together with an explicit application identity,
+        set before any window exists, that covers all three.
+        """
         try:
             images = [tk.PhotoImage(data=blob) for blob in
                       (ICON_PNG_64, ICON_PNG_32, ICON_PNG_16)]
@@ -2755,6 +4655,21 @@ class App:
             self.root.iconphoto(True, *images)
         except Exception:
             pass                                 # a missing icon is not fatal
+
+        if not IS_WINDOWS:
+            return
+        try:
+            data = base64.b64decode(ICON_ICO)
+            path = os.path.join(tempfile.gettempdir(), "gridwyrm-taskbar.ico")
+            if not os.path.exists(path) or os.path.getsize(path) != len(data):
+                with open(path, "wb") as handle:
+                    handle.write(data)
+            # Both calls: default sets it for windows opened later, the plain
+            # one applies it to this window, which already exists.
+            self.root.iconbitmap(default=path)
+            self.root.iconbitmap(path)
+        except Exception:
+            pass
 
     # -- error containment -------------------------------------------------
 
@@ -2814,6 +4729,7 @@ class App:
             "cell_up": lambda: self.bump(self.cell, 1, force=True),
             "cycle_shape": self.cycle_shape,
             "focus_panel": self.focus_panel,
+            "reveal_ranges": self.reveal_ranges,
         }
         return {name: self._guard(function) for name, function in raw.items()}
 
@@ -2892,7 +4808,8 @@ class App:
         self.viewport.configure(bg=INK)
         self.preview.configure(bg=INK, highlightbackground=LINE)
         self._map_size = None                    # chip colours follow the theme
-        self.swatches.configure(bg=PANEL)
+        for strip in self._swatch_strips:
+            strip["canvas"].configure(bg=PANEL)
         set_frame_mode(self.root)
         if self.settings_window is not None:
             self.settings_window.restyle()
@@ -2919,11 +4836,30 @@ class App:
         start = big + self._px(15)
         return box, big, gap, divider, start
 
+    def add_swatch_strip(self, parent, variable, picker):
+        """A colour-in-use swatch, a divider, then the presets.
+
+        Registered rather than hard-wired, so the grid colour and the band
+        colour share one implementation and both follow a theme change.
+        """
+        canvas = tk.Canvas(parent, height=self._px(20), bg=PANEL,
+                           highlightthickness=0, bd=0, takefocus=0,
+                           cursor="hand2")
+        strip = {"canvas": canvas, "var": variable, "picker": picker}
+        self._swatch_strips.append(strip)
+        canvas.bind("<Button-1>", lambda e, s=strip: self._swatch_click(e, s))
+        canvas.bind("<Configure>", lambda e: self._paint_swatches())
+        return canvas
+
     def _paint_swatches(self):
-        c = self.swatches
+        for strip in self._swatch_strips:
+            self._paint_swatch_strip(strip)
+
+    def _paint_swatch_strip(self, strip):
+        c = strip["canvas"]
         c.delete("all")
         width = c.winfo_width()
-        current = str(self.colour.get())
+        current = str(strip["var"].get())
         box, big, gap, divider, start = self._swatch_metrics()
 
         # The colour in use, kept apart from the presets. A colour chosen from
@@ -2947,16 +4883,16 @@ class App:
                 width=2 if active else 1,
             )
 
-    def _swatch_click(self, event):
+    def _swatch_click(self, event, strip):
         box, big, gap, _divider, start = self._swatch_metrics()
         if event.x <= big and event.y <= box:
-            self.pick_colour()                   # the current swatch opens the picker
+            strip["picker"]()                    # the current swatch opens the picker
             return
         index = int((event.x - start) / float(box + gap))
         if 0 <= index < len(GRID_PRESETS) and event.y <= box:
             left = start + index * (box + gap)
             if left <= event.x <= left + box:    # ignore clicks in the gaps
-                self.colour.set(GRID_PRESETS[index])
+                strip["var"].set(GRID_PRESETS[index])
 
     # -- preview backdrop --------------------------------------------------
 
@@ -3195,7 +5131,14 @@ class App:
         )
         for sequence, var, delta in pairs:
             r.bind(sequence, lambda e, v=var, d=delta: self.bump(v, d))
-        r.bind("<h>", lambda e: self.toggle_visible())
+
+        # There is deliberately no bare-letter shortcut here. A plain "h" used
+        # to hide the overlay, but a key binding on the window catches the
+        # keystroke wherever the focus is, so typing a band name containing an
+        # h - Reach, for one - toggled the grid mid-word. The global hotkey
+        # already does the job and works whether this panel has focus or not,
+        # which made the local one redundant as well as hazardous. The bindings
+        # above are safe because bump ignores them while a field has focus.
         # Escape deliberately does nothing here. Closing a tool that sits open
         # all session on a single stray keypress is too easy to do by accident;
         # dialogs still use Escape to dismiss themselves.
@@ -3222,6 +5165,25 @@ class App:
                               "Grid line colour").show()
         if chosen:
             self.colour.set(chosen)
+
+    def _refresh_band_summary(self):
+        """The distances, listed for the DM only.
+
+        This is where the numbers live now. Nothing is printed on the map until
+        the reveal key is held, so glancing at the panel is how you know what
+        the rings mean.
+        """
+        unit = self.unit.get()
+        suffix = "" if unit == "squares" else " " + unit
+        self.band_summary.set("   \u00b7   ".join(
+            "%s %s%s" % (name, tidy_number(distance, 2), suffix)
+            for name, distance in self.bands))
+
+    def pick_band_colour(self):
+        chosen = ColourPicker(self, self.root, self.band_colour.get(),
+                              "Range band colour").show()
+        if chosen:
+            self.band_colour.set(chosen)
 
     def apply_screen(self):
         choice = self.screen_choice.get()
@@ -3321,6 +5283,15 @@ class App:
             "click_through": bool(self.click_through.get()),
             "overlay_on_start": bool(self.overlay_on_start.get()),
             "preview_image": self.preview_image_path,
+            "per_square": safe_float(self.per_square, 5.0),
+            "unit": self.unit.get(),
+            "diagonal_rule": self.diagonal_rule.get(),
+            "bands": format_bands(self.bands),
+            "range_mode": self.range_mode.get(),
+            "band_colour": self.band_colour.get(),
+            "conditions": format_conditions(self.conditions),
+            "conditions_version": CONDITION_DEFAULTS_VERSION,
+            "marker_size": int(safe_float(self.marker_size, 84)),
             "hotkeys": self.hotkeys,
             "hotkeys_version": HOTKEY_DEFAULTS_VERSION,
             "theme": self.theme_name,

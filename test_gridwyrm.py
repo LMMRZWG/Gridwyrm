@@ -19,10 +19,29 @@ import shutil
 import tempfile
 import unittest
 
+# Gridwyrm ships as a single .pyw file. Windows happens to treat .pyw as an
+# importable source extension and other systems do not, so the module is loaded
+# by path rather than by name. That way the tests run the same everywhere.
+def _load_gridwyrm():
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "gridwyrm.pyw")
+    if not os.path.exists(path):
+        raise unittest.SkipTest("gridwyrm.pyw is not next to the tests")
+    # An explicit loader is required: spec_from_file_location works from the
+    # extension, and .pyw is only a recognised source suffix on Windows.
+    import importlib.machinery
+    loader = importlib.machinery.SourceFileLoader("gridwyrm", path)
+    spec = importlib.util.spec_from_loader("gridwyrm", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
 try:
-    import gridwyrm
+    gridwyrm = _load_gridwyrm()
 except ImportError as error:                     # pragma: no cover
-    raise unittest.SkipTest("cannot import gridwyrm: %s" % error)
+    raise unittest.SkipTest("cannot load gridwyrm.pyw: %s" % error)
 
 
 class SquareGrid(unittest.TestCase):
@@ -281,28 +300,547 @@ class SampleMap(unittest.TestCase):
             self.assertLessEqual(value, 1.0)
 
 
-class TwoNames(unittest.TestCase):
-    """gridwyrm.py and gridwyrm.pyw are the same program under two names.
+class Measuring(unittest.TestCase):
 
-    Windows chooses the interpreter from the extension: .pyw gets pythonw.exe
-    and no console window, .py gets python.exe and keeps one. An earlier attempt
-    used a small .pyw launcher that imported the .py, which was fragile, because
-    Windows also treats .pyw as an importable source extension and the launcher
-    could import itself. Holding the same code under both names is duller and it
-    works. This test is what stops the two drifting apart unnoticed.
+    def test_shift_is_the_bit_tk_reports_for_shift(self):
+        """Snapping is opt-in now, so the modifier has to be read correctly."""
+        self.assertEqual(gridwyrm.SHIFT_HELD, 0x0001)
+
+    def test_a_nearly_straight_line_is_straightened_when_asked(self):
+        """With Shift held, a few degrees of wobble should not survive."""
+        for dy in (0, 8, 20, 36):
+            x, y, snapped = gridwyrm.snap_to_axis(100, 100, 400, 100 + dy)
+            with self.subTest(dy=dy):
+                self.assertTrue(snapped)
+                self.assertEqual((x, y), (400, 100))
+
+    def test_a_real_diagonal_is_left_alone(self):
+        x, y, snapped = gridwyrm.snap_to_axis(100, 100, 400, 400)
+        self.assertFalse(snapped)
+        self.assertEqual((x, y), (400, 400))
+
+    def test_near_vertical_snaps_to_vertical(self):
+        x, y, snapped = gridwyrm.snap_to_axis(100, 100, 112, 400)
+        self.assertTrue(snapped)
+        self.assertEqual((x, y), (100, 400))
+
+    def test_a_zero_length_span_is_harmless(self):
+        self.assertEqual(gridwyrm.snap_to_axis(50, 50, 50, 50),
+                         (50, 50, False))
+
+    def test_diagonal_counts_as_one_square(self):
+        """Three across and three down is three squares at most tables."""
+        distance = gridwyrm.grid_distance(192, 192, 64, gridwyrm.DIAGONAL_RULES[0])
+        self.assertAlmostEqual(distance, 3.0, places=6)
+
+    def test_true_distance_measures_the_hypotenuse(self):
+        distance = gridwyrm.grid_distance(192, 192, 64, gridwyrm.DIAGONAL_RULES[1])
+        self.assertAlmostEqual(distance, 3 * 2 ** 0.5, places=6)
+
+    def test_straight_spans_agree_under_both_rules(self):
+        for dx, dy in ((256, 0), (0, 320)):
+            first = gridwyrm.grid_distance(dx, dy, 64, gridwyrm.DIAGONAL_RULES[0])
+            second = gridwyrm.grid_distance(dx, dy, 64, gridwyrm.DIAGONAL_RULES[1])
+            self.assertAlmostEqual(first, second, places=6)
+
+    def test_distance_survives_a_degenerate_cell(self):
+        self.assertEqual(gridwyrm.grid_distance(100, 100, 0, "anything"), 0.0)
+
+    def test_readout_mentions_the_unit_only_when_there_is_one(self):
+        rule = gridwyrm.DIAGONAL_RULES[0]
+        feet = gridwyrm.format_measurement(256, 0, 64, rule, 5, "ft")
+        self.assertIn("20 ft", feet)
+        self.assertIn("4 squares", feet)
+        bare = gridwyrm.format_measurement(256, 0, 64, rule, 5, "squares")
+        self.assertIn("4 squares", bare)
+        self.assertNotIn("ft", bare)
+
+    def test_pointless_zeros_are_trimmed(self):
+        self.assertEqual(gridwyrm.tidy_number(6.0), "6")
+        self.assertEqual(gridwyrm.tidy_number(6.25), "6.2")
+        self.assertEqual(gridwyrm.tidy_number(0.0), "0")
+        self.assertEqual(gridwyrm.tidy_number(7.5, 2), "7.5")
+        self.assertEqual(gridwyrm.tidy_number(63.5, 2), "63.5")
+
+    def test_whole_numbers_survive_zero_places(self):
+        """Stripping zeros carelessly would turn 20 into 2."""
+        self.assertEqual(gridwyrm.tidy_number(20.0, 0), "20")
+        self.assertEqual(gridwyrm.tidy_number(100.0, 0), "100")
+        self.assertEqual(gridwyrm.tidy_number(30.4, 0), "30")
+
+    def test_cell_size_is_solved_from_a_span(self):
+        self.assertEqual(gridwyrm.cell_size_from_span(256, 0, 4), 64.0)
+        self.assertEqual(gridwyrm.cell_size_from_span(254, 0, 4), 63.5)
+        self.assertEqual(gridwyrm.cell_size_from_span(0, 190.5, 3), 63.5)
+
+    def test_calibration_refuses_rather_than_wrecking_alignment(self):
+        """An alignment that already works must survive a stray click."""
+        for span, squares, why in (
+                (256, 0, "zero squares"),
+                (256, -2, "negative squares"),
+                (2, 4, "span far too short"),
+                (256, "", "empty box"),
+                (256, "abc", "not a number"),
+                (256, None, "nothing given"),
+                (256, 100, "cell would be tiny"),
+                (5000, 2, "cell would be enormous")):
+            with self.subTest(why=why):
+                self.assertIsNone(
+                    gridwyrm.cell_size_from_span(span, 0, squares))
+
+    def test_the_offered_rules_and_units_are_the_real_ones(self):
+        self.assertIn("ft", gridwyrm.UNIT_CHOICES)
+        self.assertIn("squares", gridwyrm.UNIT_CHOICES)
+        self.assertEqual(len(gridwyrm.DIAGONAL_RULES), 2)
+
+
+class RangeBands(unittest.TestCase):
+
+    def test_the_defaults_parse_and_round_trip(self):
+        bands, error = gridwyrm.parse_bands(
+            gridwyrm.format_bands(gridwyrm.DEFAULT_BANDS))
+        self.assertEqual(error, "")
+        self.assertEqual([name for name, _ in bands],
+                         [name for name, _ in gridwyrm.DEFAULT_BANDS])
+
+    def test_bands_are_sorted_by_distance(self):
+        bands, error = gridwyrm.parse_bands("Far = 60\nMelee = 5\nNear = 30")
+        self.assertEqual(error, "")
+        self.assertEqual([name for name, _ in bands], ["Melee", "Near", "Far"])
+
+    def test_blank_lines_and_comments_are_ignored(self):
+        bands, error = gridwyrm.parse_bands("# a note\n\nClose = 10\n\n")
+        self.assertEqual(error, "")
+        self.assertEqual(bands, [("Close", 10.0)])
+
+    def test_a_comma_decimal_is_accepted(self):
+        bands, _error = gridwyrm.parse_bands("Short = 7,5")
+        self.assertEqual(bands, [("Short", 7.5)])
+
+    def test_bad_input_is_reported_with_a_line_number(self):
+        for text, expect in (
+                ("Melee 5", "Line 1"),
+                ("= 5", "Line 1"),
+                ("Melee = wide", "Line 1"),
+                ("Melee = 0", "Line 1"),
+                ("Melee = -5", "Line 1"),
+                ("Melee = 5\nReach = nope", "Line 2")):
+            with self.subTest(text=text):
+                bands, error = gridwyrm.parse_bands(text)
+                self.assertIsNone(bands)
+                self.assertIn(expect, error)
+
+    def test_empty_input_is_refused(self):
+        bands, error = gridwyrm.parse_bands("   \n\n")
+        self.assertIsNone(bands)
+        self.assertTrue(error)
+
+    def test_too_many_bands_are_refused(self):
+        text = "\n".join("B%d = %d" % (i, i + 1) for i in range(12))
+        bands, error = gridwyrm.parse_bands(text)
+        self.assertIsNone(bands)
+        self.assertIn("readable", error)
+
+    def test_radii_convert_through_squares(self):
+        """A 30ft band with 5ft squares and 64px cells is six squares out.
+
+        Written with explicit bands rather than the defaults, so changing the
+        defaults cannot make this fail for the wrong reason.
+        """
+        rings = dict(gridwyrm.band_radii(
+            [("A", 5.0), ("B", 30.0), ("C", 45.0)], 64, 5))
+        self.assertAlmostEqual(rings["A"], 64.0, places=6)
+        self.assertAlmostEqual(rings["B"], 384.0, places=6)
+        self.assertAlmostEqual(rings["C"], 576.0, places=6)
+
+    def test_radii_scale_with_the_cell_size(self):
+        """Rings follow the grid, so re-scaling the grid re-scales them."""
+        band = [("Near", 20.0)]
+        small = dict(gridwyrm.band_radii(band, 32, 5))["Near"]
+        large = dict(gridwyrm.band_radii(band, 64, 5))["Near"]
+        self.assertAlmostEqual(large, small * 2, places=6)
+
+    def test_radii_follow_the_unit(self):
+        """Metres per square gives different pixels for the same band."""
+        feet = dict(gridwyrm.band_radii([("Near", 30)], 64, 5))["Near"]
+        metres = dict(gridwyrm.band_radii([("Near", 30)], 64, 1.5))["Near"]
+        self.assertLess(feet, metres)
+
+    def test_radii_survive_degenerate_input(self):
+        self.assertEqual(gridwyrm.band_radii(gridwyrm.DEFAULT_BANDS, 0, 5), [])
+        self.assertEqual(gridwyrm.band_radii(gridwyrm.DEFAULT_BANDS, 64, 0), [])
+
+    def test_bands_are_circles_only(self):
+        """A square ring on a square grid is indistinguishable from the grid.
+
+        An earlier version drew squares under a diagonal-counts-as-one rule,
+        which was consistent with the rule and unreadable on screen. The rule
+        still governs the measuring readout; it no longer governs the shape.
+        """
+        self.assertFalse(hasattr(gridwyrm, "ring_is_square"))
+
+    def test_bands_are_never_filled(self):
+        """Revealing means naming a ring, not shading everything inside it.
+
+        Faking transparency with a stipple covered the map even at the sparsest
+        pattern Tk offers, so there is no fill in either state.
+        """
+        self.assertFalse(hasattr(gridwyrm, "STIPPLE_PRIVATE"))
+        self.assertFalse(hasattr(gridwyrm, "STIPPLE_REVEALED"))
+        self.assertLess(gridwyrm.RING_WEIGHT_PRIVATE,
+                        gridwyrm.RING_WEIGHT_REVEALED)
+
+    def test_default_bands_fit_a_small_screen(self):
+        """A laptop at a large cell size is the tight case, not a 1080p desktop."""
+        radii = [radius for _name, radius
+                 in gridwyrm.band_radii(gridwyrm.DEFAULT_BANDS, 64, 5)]
+        self.assertLessEqual(max(radii), 455)    # half of 911px of height
+
+    def test_oversized_rings_are_left_out_and_named(self):
+        rings = [("Melee", 64.0), ("Near", 192.0), ("Far", 900.0)]
+        fits, too_big = gridwyrm.visible_rings(rings, 1710, 911)
+        self.assertEqual([name for name, _r in fits], ["Melee", "Near"])
+        self.assertEqual(too_big, ["Far"])
+
+    def test_the_limit_follows_the_shorter_edge(self):
+        """A wide, short screen is limited by its height."""
+        rings = [("A", 400.0)]
+        fits, too_big = gridwyrm.visible_rings(rings, 3840, 600)
+        self.assertEqual(fits, [])
+        self.assertEqual(too_big, ["A"])
+        fits, too_big = gridwyrm.visible_rings(rings, 3840, 1600)
+        self.assertEqual([name for name, _r in fits], ["A"])
+        self.assertEqual(too_big, [])
+
+    def test_an_unmeasured_overlay_keeps_every_ring(self):
+        """Before the overlay has a size, nothing should be discarded."""
+        rings = [("A", 5000.0)]
+        fits, too_big = gridwyrm.visible_rings(rings, 0, 0)
+        self.assertEqual(fits, rings)
+        self.assertEqual(too_big, [])
+
+    def test_default_bands_are_ordered_and_distinct(self):
+        distances = [distance for _name, distance in gridwyrm.DEFAULT_BANDS]
+        self.assertEqual(distances, sorted(distances))
+        self.assertEqual(len(distances), len(set(distances)))
+
+    def test_the_offered_modes_are_the_real_ones(self):
+        self.assertEqual(gridwyrm.RANGE_MODES,
+                         ("Off", "DM only", "Show players"))
+
+    def test_reveal_has_a_hotkey_of_its_own(self):
+        actions = [action for action, _label, _repeat in gridwyrm.ACTIONS]
+        self.assertIn("reveal_ranges", actions)
+        self.assertIn("reveal_ranges", gridwyrm.DEFAULT_HOTKEYS)
+
+
+class BandEditor(unittest.TestCase):
+    """The bands are edited as rows now, so pairs are validated rather than text."""
+
+    def test_valid_rows_are_accepted_and_sorted(self):
+        bands, error = gridwyrm.validate_bands(
+            [("Far", "25"), ("Melee", "5"), ("Near", "15")])
+        self.assertEqual(error, "")
+        self.assertEqual([name for name, _d in bands],
+                         ["Melee", "Near", "Far"])
+
+    def test_an_untouched_row_is_skipped_not_rejected(self):
+        """Adding a row and not filling it must not block Apply."""
+        bands, error = gridwyrm.validate_bands(
+            [("Melee", "5"), ("", ""), ("   ", "  ")])
+        self.assertEqual(error, "")
+        self.assertEqual(bands, [("Melee", 5.0)])
+
+    def test_a_half_filled_row_is_an_error(self):
+        for rows, expect in (
+                ([("Melee", "5"), ("", "20")], "no name"),
+                ([("Melee", "5"), ("Near", "")], "no distance")):
+            with self.subTest(rows=rows):
+                bands, error = gridwyrm.validate_bands(rows)
+                self.assertIsNone(bands)
+                self.assertIn(expect, error)
+
+    def test_duplicate_names_are_refused(self):
+        """Two identical labels on the map would be meaningless."""
+        bands, error = gridwyrm.validate_bands(
+            [("Near", "10"), ("near", "20")])
+        self.assertIsNone(bands)
+        self.assertIn("both called", error)
+
+    def test_an_equals_sign_in_a_name_is_refused(self):
+        """Bands are stored as text, so a name with = would not survive a save."""
+        bands, error = gridwyrm.validate_bands([("A = B", "10")])
+        self.assertIsNone(bands)
+        self.assertIn("equals", error)
+
+    def test_bad_distances_are_refused_with_a_row_number(self):
+        for value in ("wide", "0", "-5"):
+            with self.subTest(value=value):
+                bands, error = gridwyrm.validate_bands(
+                    [("Melee", "5"), ("Near", value)])
+                self.assertIsNone(bands)
+                self.assertIn("Row 2", error)
+
+    def test_a_comma_decimal_is_accepted(self):
+        bands, _error = gridwyrm.validate_bands([("Short", "7,5")])
+        self.assertEqual(bands, [("Short", 7.5)])
+
+    def test_all_rows_blank_is_refused(self):
+        bands, error = gridwyrm.validate_bands([("", ""), ("", "")])
+        self.assertIsNone(bands)
+        self.assertIn("at least one", error)
+
+    def test_too_many_bands_are_refused(self):
+        rows = [("B%d" % i, str(i + 1)) for i in range(gridwyrm.MAX_BANDS + 2)]
+        bands, error = gridwyrm.validate_bands(rows)
+        self.assertIsNone(bands)
+        self.assertIn("readable", error)
+
+    def test_the_editor_and_the_saved_text_agree(self):
+        """Rows are validated, then stored as text, so the two must round-trip."""
+        rows = [("Melee", "5"), ("Near", "15")]
+        bands, _error = gridwyrm.validate_bands(rows)
+        again, error = gridwyrm.parse_bands(gridwyrm.format_bands(bands))
+        self.assertEqual(error, "")
+        self.assertEqual(again, bands)
+
+
+class Conditions(unittest.TestCase):
+
+    def test_defaults_are_valid_and_distinct(self):
+        conditions, error = gridwyrm.validate_conditions(
+            gridwyrm.DEFAULT_CONDITIONS)
+        self.assertEqual(error, "")
+        names = [name for name, _c in conditions]
+        colours = [colour for _n, colour in conditions]
+        self.assertEqual(len(set(names)), len(names))
+        self.assertEqual(len(set(colours)), len(colours))
+
+    def test_a_colour_must_be_a_real_hex_value(self):
+        for colour in ("green", "", "#12345", "#GGGGGG"):
+            with self.subTest(colour=colour):
+                conditions, error = gridwyrm.validate_conditions(
+                    [("Poisoned", colour)])
+                self.assertIsNone(conditions)
+                self.assertIn("Row 1", error)
+
+    def test_an_untouched_row_is_skipped(self):
+        conditions, error = gridwyrm.validate_conditions(
+            [("Poisoned", "#4CAF50"), ("", "")])
+        self.assertEqual(error, "")
+        self.assertEqual(conditions, [("Poisoned", "#4CAF50")])
+
+    def test_duplicate_names_are_refused_with_the_typed_casing(self):
+        conditions, error = gridwyrm.validate_conditions(
+            [("Fire", "#FF0000"), ("fire", "#00FF00")])
+        self.assertIsNone(conditions)
+        self.assertIn("Fire", error)
+
+    def test_every_condition_on_the_rings_is_present(self):
+        """All fifteen, named as they are printed on the physical rings."""
+        names = {name.lower() for name, _c in gridwyrm.DEFAULT_CONDITIONS}
+        for expected in ("blind", "charmed", "deaf", "exhausted", "frightened",
+                         "grappled", "incapacitated", "invisible", "paralyzed",
+                         "petrified", "poisoned", "prone", "restrained",
+                         "stunned", "unconscious"):
+            self.assertIn(expected, names)
+        self.assertEqual(len(gridwyrm.DEFAULT_CONDITIONS), 15)
+
+    def test_a_never_chosen_list_is_upgraded(self):
+        """The five invented conditions were inherited, not picked."""
+        old = gridwyrm.format_conditions(gridwyrm.SUPERSEDED_CONDITIONS[0])
+        upgraded = gridwyrm.normalise_conditions(old, 0)
+        self.assertEqual(len(upgraded), len(gridwyrm.DEFAULT_CONDITIONS))
+        self.assertIn(["Blind", "#E8B923"], upgraded)
+
+    def test_a_real_choice_survives(self):
+        mine = gridwyrm.format_conditions(
+            [("Marked", "#FF00FF"), ("Hasted", "#00FFAA")])
+        kept = gridwyrm.normalise_conditions(mine, 0)
+        self.assertEqual(kept, [["Marked", "#FF00FF"], ["Hasted", "#00FFAA"]])
+
+    def test_a_current_file_is_left_alone(self):
+        current = gridwyrm.format_conditions(gridwyrm.DEFAULT_CONDITIONS)
+        kept = gridwyrm.normalise_conditions(
+            current, gridwyrm.CONDITION_DEFAULTS_VERSION)
+        self.assertEqual(len(kept), 15)
+
+    def test_an_empty_file_gets_the_defaults(self):
+        self.assertEqual(len(gridwyrm.normalise_conditions("", 0)), 15)
+
+    def test_the_list_fits_within_the_limit(self):
+        self.assertLessEqual(len(gridwyrm.DEFAULT_CONDITIONS),
+                             gridwyrm.MAX_CONDITIONS)
+
+    def test_the_near_white_conditions_are_still_distinguishable(self):
+        """Four are near-white in the physical set; on screen they must differ."""
+        pale = {name: colour for name, colour in gridwyrm.DEFAULT_CONDITIONS
+                if gridwyrm.luminance(colour) > 0.5}
+        self.assertGreaterEqual(len(pale), 3)
+        self.assertEqual(len(set(pale.values())), len(pale))
+
+    def test_too_many_are_refused(self):
+        rows = [("C%d" % i, "#FF0000")
+                for i in range(gridwyrm.MAX_CONDITIONS + 2)]
+        conditions, error = gridwyrm.validate_conditions(rows)
+        self.assertIsNone(conditions)
+        self.assertIn("fits", error)
+
+    def test_the_saved_form_round_trips(self):
+        conditions, _error = gridwyrm.validate_conditions(
+            gridwyrm.DEFAULT_CONDITIONS)
+        again, error = gridwyrm.parse_conditions(
+            gridwyrm.format_conditions(conditions))
+        self.assertEqual(error, "")
+        self.assertEqual(again, conditions)
+
+    def test_every_default_colour_gets_a_readable_outline(self):
+        """Each ring is a colour over a halo, so the two have to contrast."""
+        for name, colour in gridwyrm.DEFAULT_CONDITIONS:
+            with self.subTest(name=name):
+                halo = gridwyrm.contrast_halo(colour)
+                self.assertIn(halo, ("#000000", "#FFFFFF"))
+                self.assertGreater(
+                    abs(gridwyrm.luminance(colour) - gridwyrm.luminance(halo)),
+                    0.1)
+
+    def test_a_tapped_reveal_is_held_long_enough_to_see(self):
+        """Without a floor, a quick press showed the names for one frame."""
+        self.assertGreaterEqual(gridwyrm.MIN_REVEAL_MS, 300)
+
+
+class CellFootprint(unittest.TestCase):
+    """A hex is far wider than its cell size suggests, and markers must know it."""
+
+    def test_a_square_cell_is_its_own_width(self):
+        self.assertEqual(gridwyrm.cell_footprint("Square", 64), 64.0)
+
+    def test_a_hex_is_measured_edge_to_edge(self):
+        """Cell size is centre-to-vertex, so the short diameter is root three."""
+        for kind in ("Hex (pointy top)", "Hex (flat top)"):
+            with self.subTest(kind=kind):
+                self.assertAlmostEqual(gridwyrm.cell_footprint(kind, 64),
+                                       64 * 3 ** 0.5, places=6)
+
+    def test_a_hex_marker_comes_out_larger_than_a_square_one(self):
+        """The bug this fixes: identical settings gave a tiny ring on hexes."""
+        square = gridwyrm.cell_footprint("Square", 64)
+        hexagon = gridwyrm.cell_footprint("Hex (pointy top)", 64)
+        self.assertGreater(hexagon, square * 1.7)
+
+    def test_a_default_marker_sits_inside_its_hex(self):
+        """It should fill the hex without spilling past the edges."""
+        cell = 64
+        radius = gridwyrm.cell_footprint("Hex (pointy top)", cell) * 84 / 200.0
+        inradius = cell * 3 ** 0.5 / 2                # centre to edge midpoint
+        self.assertLess(radius, inradius)
+        self.assertGreater(radius, inradius * 0.7)
+
+
+class MarkerPlacement(unittest.TestCase):
+    """Markers are stored in grid coordinates, not pixels.
+
+    A marker sits on a creature standing in a square. Rescaling the grid or
+    nudging it into alignment moves the squares, so a pixel-anchored marker
+    would end up beside the creature it was marking.
     """
 
-    def test_the_two_files_are_identical(self):
+    def round_trip(self, x, y, cell, off_x, off_y):
+        gx = (x - off_x) / cell
+        gy = (y - off_y) / cell
+        return gx * cell + off_x, gy * cell + off_y
+
+    def test_a_marker_returns_to_where_it_was_placed(self):
+        for cell, off_x, off_y in ((64, 0, 0), (63.5, 12, 4), (100, -30, 17)):
+            with self.subTest(cell=cell):
+                back = self.round_trip(500, 300, cell, off_x, off_y)
+                self.assertAlmostEqual(back[0], 500, places=6)
+                self.assertAlmostEqual(back[1], 300, places=6)
+
+    def test_a_marker_follows_its_square_when_the_grid_is_rescaled(self):
+        """Placed three squares across, it stays three squares across."""
+        cell, off = 64, 0
+        gx = (192 - off) / cell                  # three cells out
+        self.assertAlmostEqual(gx, 3.0, places=6)
+        for new_cell in (32, 100, 63.5):
+            with self.subTest(cell=new_cell):
+                self.assertAlmostEqual(gx * new_cell + off, 3 * new_cell,
+                                       places=6)
+
+    def test_a_marker_follows_the_offset(self):
+        cell = 64
+        gx = (192 - 0) / cell
+        self.assertAlmostEqual(gx * cell + 20, 212, places=6)
+
+
+class PanelShortcuts(unittest.TestCase):
+    """No shortcut may fire while someone is typing in a field.
+
+    Tk delivers a key event to the focused widget and then up to the window, so
+    a binding on the window catches every keystroke in the panel. A bare letter
+    is therefore unusable: an "h" bound to hide the overlay went off in the
+    middle of typing a band name. The surviving shortcuts all route through
+    bump, which stops when a field has focus.
+    """
+
+    def _source(self):
         here = os.path.dirname(os.path.abspath(__file__))
-        plain = os.path.join(here, "gridwyrm.py")
-        windowless = os.path.join(here, "gridwyrm.pyw")
-        if not (os.path.exists(plain) and os.path.exists(windowless)):
-            self.skipTest("both gridwyrm.py and gridwyrm.pyw must be present")
-        with open(plain, "rb") as first, open(windowless, "rb") as second:
-            self.assertEqual(
-                first.read(), second.read(),
-                "gridwyrm.py and gridwyrm.pyw have drifted apart. "
-                "Copy whichever one you changed over the other.")
+        with open(os.path.join(here, "gridwyrm.pyw"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_no_bare_letter_is_bound_to_the_window(self):
+        import re
+        matches = re.findall(r'r\.bind\("<[a-zA-Z]>"', self._source())
+        self.assertEqual(matches, [])
+
+    def test_the_value_shortcuts_check_for_a_focused_field(self):
+        source = self._source()
+        bump = source.split("def bump(self")[1].split("\n    def ")[0]
+        self.assertIn("focus_get", bump)
+        self.assertIn("ttk.Entry", bump)
+
+    def test_the_footer_does_not_advertise_a_removed_shortcut(self):
+        source = self._source()
+        self.assertNotIn("H show or hide", source)
+        self.assertNotIn("Esc quit", source)
+
+
+class TaskbarIcon(unittest.TestCase):
+    """Tk reads the .ico itself and only understands classic DIB entries.
+
+    A modern PNG-compressed .ico is accepted without complaint and then
+    ignored, which is why the taskbar kept showing the toolkit's own icon. The
+    embedded copy therefore has to be DIB, and this is the check that it stays
+    that way.
+    """
+
+    def _entries(self):
+        import base64
+        import struct
+        data = base64.b64decode(gridwyrm.ICON_ICO)
+        reserved, kind, count = struct.unpack("<HHH", data[:6])
+        self.assertEqual((reserved, kind), (0, 1))
+        found = []
+        for index in range(count):
+            start = 6 + 16 * index
+            fields = struct.unpack("<BBBBHHII", data[start:start + 16])
+            width, size_in_res, offset = fields[0], fields[6], fields[7]
+            found.append((width, size_in_res, offset, data))
+        return found
+
+    def test_every_entry_is_dib_not_png(self):
+        import struct
+        for width, size_in_res, offset, data in self._entries():
+            with self.subTest(width=width):
+                self.assertNotEqual(data[offset:offset + 4], b"\x89PNG")
+                header_size = struct.unpack("<I", data[offset:offset + 4])[0]
+                self.assertEqual(header_size, 40)   # BITMAPINFOHEADER
+                self.assertLessEqual(offset + size_in_res, len(data))
+
+    def test_the_sizes_windows_asks_for_are_present(self):
+        widths = {width for width, _s, _o, _d in self._entries()}
+        for needed in (16, 32, 48):
+            self.assertIn(needed, widths)
 
 
 if __name__ == "__main__":
