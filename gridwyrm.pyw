@@ -37,7 +37,10 @@ import tempfile
 import threading
 import time
 import traceback
+import shutil
+import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 import tkinter as tk
@@ -1381,10 +1384,31 @@ def is_newer(candidate, current):
     return left > right
 
 
-def read_latest_release(url=UPDATE_API, timeout=6.0):
-    """Ask GitHub for the newest release. Returns (tag, page url).
+# Only these hosts are ever downloaded from. A reply that pointed the installer
+# anywhere else, whether through a compromised account or a hijacked connection,
+# is refused rather than followed.
+TRUSTED_DOWNLOAD_HOSTS = ("github.com", "objects.githubusercontent.com",
+                          "release-assets.githubusercontent.com")
 
-    Raises on any failure, which the caller swallows. An update check that
+
+def download_is_trusted(url):
+    """Whether a URL is somewhere we are willing to fetch a program from."""
+    try:
+        parts = urllib.parse.urlsplit(str(url))
+    except Exception:
+        return False
+    if parts.scheme != "https":
+        return False
+    host = (parts.hostname or "").lower()
+    return (host in TRUSTED_DOWNLOAD_HOSTS
+            or host.endswith(".githubusercontent.com"))
+
+
+def read_latest_release(url=UPDATE_API, timeout=6.0):
+    """Ask GitHub for the newest release.
+
+    Returns a dict with the tag, the page, and the .exe asset if the release has
+    one. Raises on any failure, which the caller swallows: an update check that
     complains when the network is down is worse than no update check.
     """
     request = urllib.request.Request(url, headers={
@@ -1394,10 +1418,73 @@ def read_latest_release(url=UPDATE_API, timeout=6.0):
     })
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8", "replace"))
+
     tag = str(payload.get("tag_name") or "").strip()
     if not tag:
         raise ValueError("no tag_name in the reply")
-    return tag, str(payload.get("html_url") or RELEASES_PAGE)
+
+    asset = None
+    for item in payload.get("assets") or []:
+        name = str(item.get("name") or "")
+        link = str(item.get("browser_download_url") or "")
+        if name.lower().endswith(".exe") and download_is_trusted(link):
+            asset = {"name": name, "url": link,
+                     "size": int(item.get("size") or 0)}
+            break
+
+    return {"tag": tag,
+            "page": str(payload.get("html_url") or RELEASES_PAGE),
+            "asset": asset}
+
+
+def download_release_asset(url, destination, expected_size=0, timeout=120.0):
+    """Fetch the new program to a file beside the current one.
+
+    The declared size is checked afterwards, because a download cut short by a
+    dropped connection would otherwise be installed as though it were whole.
+    """
+    if not download_is_trusted(url):
+        raise ValueError("refusing to download from %s" % url)
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "Gridwyrm/%s" % VERSION})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open(destination, "wb") as handle:
+            shutil.copyfileobj(response, handle, 128 * 1024)
+    size = os.path.getsize(destination)
+    if expected_size and size != expected_size:
+        os.remove(destination)
+        raise ValueError("got %d bytes, expected %d" % (size, expected_size))
+    if size < 1024:
+        os.remove(destination)
+        raise ValueError("the download was empty")
+    return size
+
+
+def swap_script(current, incoming, backup, pid):
+    """A batch file that replaces the program once this copy has exited.
+
+    Windows will not let a running executable overwrite itself, so the swap has
+    to outlive the process doing it. The old copy is kept as a backup and put
+    straight back if the replacement fails, so a bad moment cannot leave someone
+    with nothing that runs.
+    """
+    return "\r\n".join([
+        "@echo off",
+        "rem Written by Gridwyrm to finish an update. Safe to delete.",
+        ":wait",
+        'tasklist /fi "PID eq %d" 2>nul | find "%d" >nul' % (pid, pid),
+        "if not errorlevel 1 (",
+        "  ping -n 2 127.0.0.1 >nul",
+        "  goto wait",
+        ")",
+        'if exist "%s" del /q "%s"' % (backup, backup),
+        'move /y "%s" "%s" >nul' % (current, backup),
+        'move /y "%s" "%s" >nul' % (incoming, current),
+        'if not exist "%s" move /y "%s" "%s" >nul' % (current, backup, current),
+        'start "" "%s"' % current,
+        'del /q "%~f0"',
+        "",
+    ])
 
 
 def update_check_due(last_checked, now=None, hours=UPDATE_INTERVAL_HOURS):
@@ -3587,10 +3674,19 @@ class App:
         self.check_updates = tk.BooleanVar(
             value=bool(saved.get("check_updates", True)))
         self.last_update_check = saved.get("last_update_check", 0)
+        # Remembered, so a known update is announced at the next startup without
+        # waiting on the network, and keeps being announced until it is taken.
+        self.latest_seen = str(saved.get("latest_seen", "") or "")
         self.update_notice = tk.StringVar(value="")
+        self.update_action = tk.StringVar(value="Open page")
         self.update_url = RELEASES_PAGE
+        self.update_asset = None
+        self.update_state = "idle"           # idle, ready, or installing
         self._update_reply = []
         self._update_worker = None
+        self._download_reply = []
+        self._download_worker = None
+        self.pending_update = ""
 
         self.status = tk.StringVar(value="Overlay live")
         self.hotkey_hint = tk.StringVar(value="")
@@ -3641,6 +3737,14 @@ class App:
         self._register_hotkeys(announce=True)
         self.hotkey_manager.start_polling()
         self._hold_top()
+
+        # A previously seen update is announced straight away. Waiting on the
+        # network for something already known would mean saying nothing at all
+        # on the days the throttle skips the check.
+        if self.latest_seen and is_newer(self.latest_seen, VERSION):
+            # The button offers the page for now. The check a moment later
+            # fetches the asset details and upgrades it to a real install.
+            self.announce_update(self.latest_seen)
 
         # Delayed, so a slow network cannot hold up the window appearing.
         self.root.after(3000, self.check_for_update)
@@ -4225,8 +4329,8 @@ class App:
         # Only packed when there is actually something to say, so it costs no
         # space and never nags.
         self.update_row = ttk.Frame(outer, style="Shell.TFrame")
-        ttk.Button(self.update_row, text="Get it",
-                   command=self.open_release_page).pack(side="right")
+        ttk.Button(self.update_row, textvariable=self.update_action,
+                   command=self.update_button_pressed).pack(side="right")
         ttk.Button(self.update_row, text="Later",
                    command=self.dismiss_update).pack(side="right",
                                                      padx=(0, self._px(6)))
@@ -4834,17 +4938,150 @@ class App:
                 self.update_notice.set("Could not reach GitHub just now.")
             return
 
-        tag, page = reply
+        tag = reply.get("tag", "")
         if is_newer(tag, VERSION):
-            self.update_url = page
-            self.update_notice.set(
-                "%s is out. You have %s." % (tag, VERSION))
-            self.update_row.pack(fill="x", padx=self._px(14),
-                                 pady=(0, self._px(8)))
+            self.latest_seen = tag
+            self.update_url = reply.get("page") or RELEASES_PAGE
+            self.update_asset = reply.get("asset")
+            self.announce_update(tag)
             log_event("update available: %s" % tag)
         else:
+            self.latest_seen = ""
             self.update_notice.set("Up to date. You have %s." % VERSION)
             log_event("up to date at %s" % VERSION)
+
+    def announce_update(self, tag):
+        """Show the notice, and label the button for what it can actually do."""
+        self.update_state = "idle"
+        if self.can_install():
+            self.update_notice.set(
+                "%s is out. You have %s." % (tag, VERSION))
+            self.update_action.set("Update now")
+        else:
+            self.update_notice.set(
+                "%s is out. You have %s." % (tag, VERSION))
+            self.update_action.set("Open page")
+        self.update_row.pack(fill="x", padx=self._px(14),
+                             pady=(0, self._px(8)))
+
+    def can_install(self):
+        """Whether Gridwyrm is able to replace itself in place.
+
+        Only a packaged build can: replacing a .pyw would mean guessing what
+        someone did with their copy of the source. The folder also has to be
+        writable, which rules out a copy sitting in Program Files.
+        """
+        if not IS_WINDOWS or not getattr(sys, "frozen", False):
+            return False
+        if not self.update_asset:
+            return False
+        folder = os.path.dirname(os.path.abspath(sys.executable))
+        probe = os.path.join(folder, ".gridwyrm-write-test")
+        try:
+            with open(probe, "wb") as handle:
+                handle.write(b"x")
+            os.remove(probe)
+            return True
+        except Exception:
+            return False
+
+    def update_button_pressed(self):
+        """One button, three jobs, depending on where the update has got to."""
+        if self.update_state == "installing":
+            return
+        if self.update_state == "ready":
+            self.install_update()
+            return
+        if self.can_install():
+            self.start_download()
+        else:
+            self.open_release_page()
+
+    def start_download(self):
+        """Fetch the new program to a file beside the current one."""
+        asset = self.update_asset
+        if not asset or not download_is_trusted(asset.get("url", "")):
+            self.open_release_page()
+            return
+        folder = os.path.dirname(os.path.abspath(sys.executable))
+        incoming = os.path.join(folder, "Gridwyrm.update.exe")
+
+        self.update_state = "installing"
+        self.update_action.set("Downloading\u2026")
+        self.update_notice.set("Fetching %s\u2026" % asset.get("name", "update"))
+        self._download_reply = []
+
+        def work():
+            # Off the Tk thread, so it appends to a list and nothing more.
+            try:
+                download_release_asset(asset["url"], incoming,
+                                       asset.get("size", 0))
+                self._download_reply.append(incoming)
+            except Exception as error:                # noqa: BLE001
+                self._download_reply.append(error)
+
+        self._download_worker = threading.Thread(target=work, daemon=True)
+        self._download_worker.start()
+        self._await_download(0)
+
+    def _await_download(self, waited):
+        if not self._download_reply:
+            if waited > 300000:                       # five minutes is plenty
+                self.update_state = "idle"
+                self.update_action.set("Open page")
+                self.update_notice.set("The download stalled. Try the page.")
+                return
+            self.root.after(300, lambda: self._await_download(waited + 300))
+            return
+
+        reply = self._download_reply[0]
+        if isinstance(reply, Exception):
+            log_event("update download failed: %s" % reply)
+            self.update_state = "idle"
+            self.update_action.set("Open page")
+            self.update_notice.set("Download failed. Try the page instead.")
+            return
+
+        self.pending_update = reply
+        self.update_state = "ready"
+        self.update_action.set("Restart now")
+        self.update_notice.set(
+            "Downloaded. Gridwyrm will close and reopen updated.")
+        log_event("update downloaded to %s" % reply)
+
+    def install_update(self):
+        """Hand the swap to a script that outlives this process, then quit."""
+        incoming = getattr(self, "pending_update", "")
+        if not incoming or not os.path.exists(incoming):
+            self.update_state = "idle"
+            self.update_action.set("Open page")
+            return
+
+        current = os.path.abspath(sys.executable)
+        folder = os.path.dirname(current)
+        backup = os.path.join(folder, "Gridwyrm.previous.exe")
+        script = os.path.join(folder, "gridwyrm-update.bat")
+
+        try:
+            # cmd.exe reads a batch file in the system code page, so that is
+            # what it gets. A folder with an accent in its name would fail to
+            # encode as plain ASCII.
+            with open(script, "w", encoding="mbcs", errors="strict") as handle:
+                handle.write(swap_script(current, incoming, backup,
+                                         os.getpid()))
+            creation = 0x00000008 | 0x08000000        # detached, no window
+            subprocess.Popen(["cmd", "/c", script], close_fds=True,
+                             creationflags=creation, cwd=folder)
+        except Exception as error:                    # noqa: BLE001
+            log_event("update install failed: %s" % error)
+            self.update_state = "idle"
+            self.update_action.set("Open page")
+            self.update_notice.set(
+                "Could not start the update. Try the page instead.")
+            return
+
+        log_event("update handed to %s, exiting" % script)
+        self.quit()
 
     def open_release_page(self):
         try:
@@ -5519,6 +5756,7 @@ class App:
             "marker_size": int(safe_float(self.marker_size, 84)),
             "check_updates": bool(self.check_updates.get()),
             "last_update_check": self.last_update_check,
+            "latest_seen": self.latest_seen,
             "hotkeys": self.hotkeys,
             "hotkeys_version": HOTKEY_DEFAULTS_VERSION,
             "theme": self.theme_name,

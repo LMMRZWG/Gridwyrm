@@ -858,6 +858,50 @@ class UpdateCheck(unittest.TestCase):
         now = 1_000_000.0
         self.assertTrue(gridwyrm.update_check_due(now + 99999, now))
 
+    def test_only_github_is_ever_downloaded_from(self):
+        """A tampered reply must not be able to point the installer elsewhere."""
+        for url in (
+                "https://github.com/LMMRZWG/Gridwyrm/releases/download/v2.1/Gridwyrm.exe",
+                "https://objects.githubusercontent.com/x/y/Gridwyrm.exe",
+                "https://release-assets.githubusercontent.com/a/Gridwyrm.exe"):
+            with self.subTest(url=url):
+                self.assertTrue(gridwyrm.download_is_trusted(url))
+
+    def test_anywhere_else_is_refused(self):
+        for url in (
+                "http://github.com/x/Gridwyrm.exe",          # not https
+                "https://githubusercontent.com.evil.tld/a.exe",
+                "https://evil.tld/Gridwyrm.exe",
+                "https://github.com.evil.tld/Gridwyrm.exe",
+                "file:///C:/Windows/System32/calc.exe",
+                "", None, "not a url at all"):
+            with self.subTest(url=url):
+                self.assertFalse(gridwyrm.download_is_trusted(url))
+
+    def test_the_swap_script_waits_before_replacing_anything(self):
+        script = gridwyrm.swap_script("C:\\g\\Gridwyrm.exe",
+                                      "C:\\g\\Gridwyrm.update.exe",
+                                      "C:\\g\\Gridwyrm.previous.exe", 4321)
+        self.assertIn("tasklist", script)
+        self.assertIn("4321", script)
+        # The wait has to come before the move, or it replaces a running file.
+        self.assertLess(script.index("tasklist"), script.index("move /y"))
+
+    def test_the_swap_script_can_put_the_old_copy_back(self):
+        """A failed move must not leave someone with nothing that runs."""
+        script = gridwyrm.swap_script("C:\\g\\Gridwyrm.exe",
+                                      "C:\\g\\Gridwyrm.update.exe",
+                                      "C:\\g\\Gridwyrm.previous.exe", 1)
+        self.assertIn("Gridwyrm.previous.exe", script)
+        self.assertIn("if not exist", script)
+        self.assertIn("start ", script)
+        self.assertTrue(script.rstrip().endswith('del /q "%~f0"'))
+
+    def test_the_swap_script_uses_windows_line_endings(self):
+        """A batch file with bare newlines misbehaves on some setups."""
+        script = gridwyrm.swap_script("a", "b", "c", 1)
+        self.assertIn("\r\n", script)
+
     def test_the_urls_point_at_this_repository(self):
         self.assertIn("LMMRZWG/Gridwyrm", gridwyrm.UPDATE_API)
         self.assertIn("LMMRZWG/Gridwyrm", gridwyrm.RELEASES_PAGE)
