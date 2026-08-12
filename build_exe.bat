@@ -1,12 +1,12 @@
 @echo off
 REM ==========================================================================
-REM  Builds gridwyrm.py into a single standalone Gridwyrm.exe
+REM  Builds gridwyrm.pyw into a single standalone Gridwyrm.exe
 REM
-REM  You normally do NOT need this. Pushing a version tag builds the exe
-REM  automatically on GitHub. Use this only if you want a build on your own
-REM  machine without waiting.
+REM  You normally do NOT need this. Publishing a release on GitHub builds the
+REM  exe automatically on a Windows runner and attaches it to that release.
+REM  Use this only when you want a build on your own machine straight away.
 REM
-REM  Run it on Windows, on a machine with Python installed. Double-click it.
+REM  Put it beside gridwyrm.pyw and icon.ico, then double-click it.
 REM ==========================================================================
 
 title Build Gridwyrm
@@ -17,24 +17,33 @@ echo  Building Gridwyrm.exe
 echo  ---------------------
 echo.
 
-if not exist gridwyrm.py goto nosource
+if not exist gridwyrm.pyw goto nosource
 
 where python >nul 2>&1
 if errorlevel 1 goto nopython
 
-echo  [1/3] Installing PyInstaller (skipped if already present)...
+echo  [1/4] Running the tests...
+if exist test_gridwyrm.py (
+  python -m unittest discover -q
+  if errorlevel 1 goto testsfailed
+  echo        all passed
+) else (
+  echo        test_gridwyrm.py not found, skipping
+)
+
+echo  [2/4] Installing PyInstaller (skipped if already present)...
 python -m pip install --upgrade --quiet pyinstaller
 if errorlevel 1 goto nopyinstaller
 
 set ICONOPT=
 if exist icon.ico set ICONOPT=--icon icon.ico
-if exist icon.ico echo  Using icon.ico
+if exist icon.ico (echo        using icon.ico) else (echo        no icon.ico found, building without one)
 
-echo  [2/3] Packaging...
-python -m PyInstaller --onefile --windowed --noupx --clean --noconfirm --name Gridwyrm %ICONOPT% gridwyrm.py
+echo  [3/4] Packaging...
+python -m PyInstaller --onefile --windowed --noupx --clean --noconfirm --name Gridwyrm %ICONOPT% gridwyrm.pyw
 if errorlevel 1 goto failed
 
-echo  [3/3] Tidying up...
+echo  [4/4] Tidying up...
 if exist build rmdir /s /q build
 if exist Gridwyrm.spec del /q Gridwyrm.spec
 
@@ -55,7 +64,7 @@ pause
 exit /b 0
 
 :nosource
-echo  gridwyrm.py was not found in this folder.
+echo  gridwyrm.pyw was not found in this folder.
 echo  Put this .bat next to it and try again.
 echo.
 pause
@@ -67,6 +76,15 @@ echo.
 echo  Install it from https://www.python.org/downloads/ and be sure to tick
 echo  "Add python.exe to PATH" on the first screen of the installer. Then
 echo  run this script again.
+echo.
+pause
+exit /b 1
+
+:testsfailed
+echo.
+echo  A test failed, so nothing was built. The output above says which one.
+echo  Build anyway by deleting test_gridwyrm.py from this folder, though it is
+echo  usually the test that is right.
 echo.
 pause
 exit /b 1
