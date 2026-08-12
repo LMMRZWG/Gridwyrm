@@ -34,8 +34,12 @@ import re
 import struct
 import sys
 import tempfile
+import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
+import webbrowser
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, ttk
@@ -1318,6 +1322,94 @@ def refresh_autostart_path():
     enabled, recorded = autostart_state()
     if enabled and recorded != autostart_command():
         set_autostart(True)
+
+
+# ==========================================================================
+# Update check
+# ==========================================================================
+# Asks GitHub whether a newer release exists, and says so. It does not download
+# or install anything.
+#
+# That is deliberate. Windows will not let a running executable overwrite
+# itself, so self-updating means spawning a helper that waits for the process to
+# die, swaps the file and starts it again. It is fiddly, it is a well-known way
+# to leave someone with no working copy, and a self-replacing unsigned binary is
+# exactly the behaviour that turns an antivirus warning into a quarantine.
+# Opening the download page costs one click and cannot break anything.
+#
+# The request carries no information about the user beyond what any HTTPS
+# request carries. It can be switched off, and it runs at most once a day.
+
+VERSION = "2.0"
+UPDATE_API = "https://api.github.com/repos/LMMRZWG/Gridwyrm/releases/latest"
+RELEASES_PAGE = "https://github.com/LMMRZWG/Gridwyrm/releases/latest"
+UPDATE_INTERVAL_HOURS = 20
+
+
+def parse_version(text):
+    """'v2.1.3' becomes (2, 1, 3). None when it cannot be read.
+
+    Tolerates a leading v, a trailing suffix such as -beta, and any number of
+    parts, because a tag is typed by hand and will not always be tidy.
+    """
+    if not text:
+        return None
+    cleaned = str(text).strip().lstrip("vV").split("+")[0].split("-")[0]
+    parts = cleaned.split(".")
+    numbers = []
+    for part in parts:
+        digits = "".join(ch for ch in part if ch.isdigit())
+        if not digits:
+            return None
+        numbers.append(int(digits))
+    return tuple(numbers) if numbers else None
+
+
+def is_newer(candidate, current):
+    """True when candidate names a later version than current.
+
+    Missing parts count as zero, so 2.1 beats 2.0.9 and matches 2.1.0. An
+    unreadable version is never treated as newer: better to miss an update than
+    to nag about one that does not exist.
+    """
+    left, right = parse_version(candidate), parse_version(current)
+    if left is None or right is None:
+        return False
+    length = max(len(left), len(right))
+    left += (0,) * (length - len(left))
+    right += (0,) * (length - len(right))
+    return left > right
+
+
+def read_latest_release(url=UPDATE_API, timeout=6.0):
+    """Ask GitHub for the newest release. Returns (tag, page url).
+
+    Raises on any failure, which the caller swallows. An update check that
+    complains when the network is down is worse than no update check.
+    """
+    request = urllib.request.Request(url, headers={
+        # GitHub refuses requests without one of these.
+        "User-Agent": "Gridwyrm/%s" % VERSION,
+        "Accept": "application/vnd.github+json",
+    })
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8", "replace"))
+    tag = str(payload.get("tag_name") or "").strip()
+    if not tag:
+        raise ValueError("no tag_name in the reply")
+    return tag, str(payload.get("html_url") or RELEASES_PAGE)
+
+
+def update_check_due(last_checked, now=None, hours=UPDATE_INTERVAL_HOURS):
+    """Whether enough time has passed. Also guards against a clock that moved."""
+    now = time.time() if now is None else now
+    try:
+        last = float(last_checked)
+    except (TypeError, ValueError):
+        return True
+    if last > now:
+        return True                              # clock changed, so check again
+    return (now - last) >= hours * 3600
 
 
 # ==========================================================================
@@ -2723,6 +2815,33 @@ class SettingsWindow:
                    "always running a game on.",
                    pady=(pad(3), 0))
 
+        ttk.Separator(inner, orient="horizontal").pack(fill="x",
+                                                       pady=(pad(12), pad(11)))
+        ttk.Label(inner, text="UPDATES", style="Head.TLabel").pack(
+            anchor="w", pady=(0, pad(8)))
+
+        ttk.Checkbutton(inner, text="Look for a newer version at startup",
+                        variable=self.app.check_updates,
+                        command=self._toggle_updates).pack(anchor="w")
+        self._note(inner,
+                   "Asks GitHub once a day whether a newer release exists, and "
+                   "says so. It never downloads or installs anything: finding "
+                   "an update gives you a button that opens the download page. "
+                   "Nothing about you is sent, and switching this off stops "
+                   "Gridwyrm using the network at all.",
+                   pady=(pad(3), pad(8)))
+
+        check_row = ttk.Frame(inner, style="Card.TFrame")
+        check_row.pack(fill="x")
+        ttk.Button(check_row, text="Check now",
+                   command=lambda: self.app.check_for_update(manual=True)
+                   ).pack(side="left")
+        ttk.Label(check_row, textvariable=self.app.update_notice,
+                  style="Hint.TLabel").pack(side="left",
+                                            padx=(pad(8), 0))
+        ttk.Label(inner, text="This copy is version %s." % VERSION,
+                  style="Hint.TLabel").pack(anchor="w", pady=(pad(6), 0))
+
         self.general_status = ttk.Label(inner, text="", style="Hint.TLabel",
                                        justify="left",
                                        wraplength=self.app._px(430))
@@ -2758,6 +2877,12 @@ class SettingsWindow:
             if self.app.start_minimised.get()
             else "This panel will start visible."
         )
+
+    def _toggle_updates(self):
+        self.general_status.configure(
+            text="Gridwyrm will look for a newer version at startup."
+            if self.app.check_updates.get()
+            else "Gridwyrm will not use the network at all.")
 
     def _toggle_overlay_start(self):
         self.general_status.configure(
@@ -3459,6 +3584,14 @@ class App:
         self._measure_timer = None
         self._measure_restore = True
 
+        self.check_updates = tk.BooleanVar(
+            value=bool(saved.get("check_updates", True)))
+        self.last_update_check = saved.get("last_update_check", 0)
+        self.update_notice = tk.StringVar(value="")
+        self.update_url = RELEASES_PAGE
+        self._update_reply = []
+        self._update_worker = None
+
         self.status = tk.StringVar(value="Overlay live")
         self.hotkey_hint = tk.StringVar(value="")
 
@@ -3508,6 +3641,9 @@ class App:
         self._register_hotkeys(announce=True)
         self.hotkey_manager.start_polling()
         self._hold_top()
+
+        # Delayed, so a slow network cannot hold up the window appearing.
+        self.root.after(3000, self.check_for_update)
 
         if self.start_minimised.get():
             self.root.iconify()
@@ -4085,6 +4221,21 @@ class App:
 
         # footer: stays put, never scrolls -------------------------------
         ttk.Separator(outer, orient="horizontal").pack(fill="x")
+
+        # Only packed when there is actually something to say, so it costs no
+        # space and never nags.
+        self.update_row = ttk.Frame(outer, style="Shell.TFrame")
+        ttk.Button(self.update_row, text="Get it",
+                   command=self.open_release_page).pack(side="right")
+        ttk.Button(self.update_row, text="Later",
+                   command=self.dismiss_update).pack(side="right",
+                                                     padx=(0, self._px(6)))
+        self._wrapping(ttk.Label(
+            self.update_row, textvariable=self.update_notice,
+            style="Shell.TLabel", justify="left",
+        ), reserve=self._px(120)).pack(side="left", fill="x", expand=True,
+                                       pady=(self._px(8), 0))
+
         foot = ttk.Frame(outer, style="Shell.TFrame")
         foot.pack(fill="x", padx=self._px(14), pady=self._px(10))
         ttk.Button(foot, text="Quit", command=self.quit).pack(side="right")
@@ -4629,6 +4780,80 @@ class App:
             self.reveal_ranges()
         else:
             self._end_reveal()
+
+    # -- update check ------------------------------------------------------
+
+    def check_for_update(self, manual=False):
+        """Ask GitHub whether there is a newer release.
+
+        The request runs on a separate thread, because a slow or unreachable
+        network would otherwise freeze the whole interface for the length of the
+        timeout. That thread touches nothing but a plain list: handing a reply
+        back through Tk from another thread is the same mistake that made the
+        hotkeys crash, and it is not worth repeating.
+        """
+        if self._update_worker is not None and self._update_worker.is_alive():
+            return
+        if not manual:
+            if not self.check_updates.get():
+                return
+            if not update_check_due(self.last_update_check):
+                return
+
+        self._update_reply = []
+        if manual:
+            self.update_notice.set("Checking\u2026")
+
+        def work():
+            try:
+                self._update_reply.append(read_latest_release())
+            except Exception as error:                # noqa: BLE001
+                self._update_reply.append(error)
+
+        self._update_worker = threading.Thread(target=work, daemon=True)
+        self._update_worker.start()
+        self.last_update_check = time.time()
+        self._await_update(manual, 0)
+
+    def _await_update(self, manual, waited):
+        if not self._update_reply:
+            if waited > 15000:
+                if manual:
+                    self.update_notice.set("GitHub did not answer in time.")
+                return
+            self.root.after(250,
+                            lambda: self._await_update(manual, waited + 250))
+            return
+
+        reply = self._update_reply[0]
+        if isinstance(reply, Exception):
+            # No network, a rate limit, or a changed reply. Say nothing unless
+            # the check was asked for by hand.
+            log_event("update check failed: %s" % reply)
+            if manual:
+                self.update_notice.set("Could not reach GitHub just now.")
+            return
+
+        tag, page = reply
+        if is_newer(tag, VERSION):
+            self.update_url = page
+            self.update_notice.set(
+                "%s is out. You have %s." % (tag, VERSION))
+            self.update_row.pack(fill="x", padx=self._px(14),
+                                 pady=(0, self._px(8)))
+            log_event("update available: %s" % tag)
+        else:
+            self.update_notice.set("Up to date. You have %s." % VERSION)
+            log_event("up to date at %s" % VERSION)
+
+    def open_release_page(self):
+        try:
+            webbrowser.open(self.update_url or RELEASES_PAGE)
+        except Exception:
+            self.update_notice.set(RELEASES_PAGE)   # at least show the address
+
+    def dismiss_update(self):
+        self.update_row.pack_forget()
 
     # -- window icon -------------------------------------------------------
 
@@ -5292,6 +5517,8 @@ class App:
             "conditions": format_conditions(self.conditions),
             "conditions_version": CONDITION_DEFAULTS_VERSION,
             "marker_size": int(safe_float(self.marker_size, 84)),
+            "check_updates": bool(self.check_updates.get()),
+            "last_update_check": self.last_update_check,
             "hotkeys": self.hotkeys,
             "hotkeys_version": HOTKEY_DEFAULTS_VERSION,
             "theme": self.theme_name,

@@ -805,6 +805,69 @@ class PanelShortcuts(unittest.TestCase):
         self.assertNotIn("Esc quit", source)
 
 
+class UpdateCheck(unittest.TestCase):
+
+    def test_a_version_string_is_read_leniently(self):
+        """Tags are typed by hand and will not always be tidy."""
+        self.assertEqual(gridwyrm.parse_version("v2.1.3"), (2, 1, 3))
+        self.assertEqual(gridwyrm.parse_version("2.1"), (2, 1))
+        self.assertEqual(gridwyrm.parse_version("V2.0"), (2, 0))
+        self.assertEqual(gridwyrm.parse_version("v2.1-beta"), (2, 1))
+        self.assertEqual(gridwyrm.parse_version("v2.1+build7"), (2, 1))
+
+    def test_nonsense_is_refused(self):
+        for text in ("", None, "garbage", "v", "v.", "vX.Y"):
+            with self.subTest(text=text):
+                self.assertIsNone(gridwyrm.parse_version(text))
+
+    def test_numbers_compare_as_numbers(self):
+        """Comparing as text would make 10.0 look older than 2.0."""
+        self.assertTrue(gridwyrm.is_newer("v10.0", "v2.0"))
+        self.assertFalse(gridwyrm.is_newer("v2.0", "v10.0"))
+
+    def test_missing_parts_count_as_zero(self):
+        self.assertTrue(gridwyrm.is_newer("2.1", "2.0.9"))
+        self.assertFalse(gridwyrm.is_newer("2.1", "2.1.0"))
+        self.assertFalse(gridwyrm.is_newer("2.1.0", "2.1"))
+
+    def test_the_same_version_is_not_newer(self):
+        self.assertFalse(gridwyrm.is_newer(gridwyrm.VERSION,
+                                           gridwyrm.VERSION))
+
+    def test_an_unreadable_reply_never_looks_newer(self):
+        """Better to miss an update than to nag about one that does not exist."""
+        for text in ("", None, "garbage", "latest"):
+            with self.subTest(text=text):
+                self.assertFalse(gridwyrm.is_newer(text, "2.0"))
+        self.assertFalse(gridwyrm.is_newer("2.1", "garbage"))
+
+    def test_the_check_is_throttled(self):
+        now = 1_000_000.0
+        hours = gridwyrm.UPDATE_INTERVAL_HOURS
+        self.assertFalse(gridwyrm.update_check_due(now - 60, now))
+        self.assertTrue(
+            gridwyrm.update_check_due(now - (hours + 1) * 3600, now))
+
+    def test_a_first_run_checks(self):
+        self.assertTrue(gridwyrm.update_check_due(0, 1_000_000.0))
+        self.assertTrue(gridwyrm.update_check_due(None, 1_000_000.0))
+        self.assertTrue(gridwyrm.update_check_due("nonsense", 1_000_000.0))
+
+    def test_a_clock_that_moved_backwards_still_checks(self):
+        """A timestamp from the future would otherwise block checks forever."""
+        now = 1_000_000.0
+        self.assertTrue(gridwyrm.update_check_due(now + 99999, now))
+
+    def test_the_urls_point_at_this_repository(self):
+        self.assertIn("LMMRZWG/Gridwyrm", gridwyrm.UPDATE_API)
+        self.assertIn("LMMRZWG/Gridwyrm", gridwyrm.RELEASES_PAGE)
+        self.assertTrue(gridwyrm.UPDATE_API.startswith("https://"))
+        self.assertTrue(gridwyrm.RELEASES_PAGE.startswith("https://"))
+
+    def test_the_version_is_readable(self):
+        self.assertIsNotNone(gridwyrm.parse_version(gridwyrm.VERSION))
+
+
 class TaskbarIcon(unittest.TestCase):
     """Tk reads the .ico itself and only understands classic DIB entries.
 

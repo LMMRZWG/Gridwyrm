@@ -48,6 +48,8 @@ your own copy.
   you set yourself
 - **Remembers everything.** Cell size, offsets, colour, screen, window size and
   position, between runs
+- **Tells you when there is a new version**, without downloading anything, and
+  can be switched off
 
 ## Requirements
 
@@ -153,8 +155,14 @@ Python. It installs PyInstaller if needed and produces `dist\Gridwyrm.exe`.
 
 ## Notes
 
-- **No telemetry, no network access.** Gridwyrm never connects to anything. The
-  only files it writes are the ones listed above.
+- **No telemetry.** Nothing about you or your use of Gridwyrm is collected or
+  sent anywhere. The only files it writes are the ones listed above.
+- **One network request, and you can switch it off.** Once a day at startup,
+  Gridwyrm asks the GitHub releases API whether a newer version exists and says
+  so if there is. It never downloads or installs anything: finding an update
+  gives you a button that opens the download page. Turn off **Look for a newer
+  version at startup** under Settings and Gridwyrm makes no network requests at
+  all.
 - **No bundled artwork.** The sample map in the preview is drawn in code, and
   the icon is embedded in the source. If you want to preview against a real map,
   point it at your own file. It is read from disk and goes nowhere.
