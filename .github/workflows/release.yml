@@ -1,17 +1,26 @@
 name: Build and release
 
-# Pushing a tag that starts with "v" builds the exe on a Windows machine that
-# GitHub provides free for public repositories, then attaches it to a release.
-# That means you never build locally, and the download link in the README
-# (releases/latest/download/Gridwyrm.exe) starts working on its own.
+# Pushing a tag, or publishing a release, builds Gridwyrm.exe on a Windows
+# machine that GitHub provides free for public repositories, then attaches it to
+# the release. That means you never build locally, and the download link in the
+# README (releases/latest/download/Gridwyrm.exe) keeps working on its own.
 #
-# You can also run it by hand from the Actions tab to check a build without
-# publishing anything.
+# It can also be run by hand from the Actions tab to check a build without
+# publishing anything, in which case the exe appears as an artifact instead.
 
 on:
+  # Publishing a release from the website. The reliable trigger, because it does
+  # not depend on how the tag was made or what it is called.
+  release:
+    types: [published]
+
+  # Pushing a tag from a command line fires it too. Case matters here: V1.0
+  # would not match, which is worth knowing before wondering why nothing ran.
   push:
     tags:
       - "v*"
+
+  # And by hand, from the Actions tab.
   workflow_dispatch:
 
 permissions:
@@ -30,9 +39,49 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check the files we need are present
+        shell: bash
+        run: |
+          # Failing here with a plain message beats a confusing PyInstaller
+          # error twenty lines deep.
+          for needed in gridwyrm.pyw icon.ico test_gridwyrm.py; do
+            if [ ! -f "$needed" ]; then
+              echo "::error::$needed is missing from the repository"
+              exit 1
+            fi
+          done
+          echo "gridwyrm.pyw, icon.ico and test_gridwyrm.py are all here"
+
+      - name: Stamp the version from the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          # The exe has to report the release it came from. Relying on someone
+          # remembering to edit a constant is how a build ends up insisting it
+          # is the previous version, and how an update notice becomes permanent.
+          tag="${GITHUB_REF_NAME#v}"
+          python - "$tag" <<'PY'
+          import re
+          import sys
+
+          tag = sys.argv[1]
+          path = "gridwyrm.pyw"
+          with open(path, encoding="utf-8") as handle:
+              source = handle.read()
+          stamped, count = re.subn(r'^VERSION = "[^"]*"',
+                                   'VERSION = "%s"' % tag,
+                                   source, count=1, flags=re.M)
+          if count != 1:
+              raise SystemExit("could not find the VERSION line to stamp")
+          with open(path, "w", encoding="utf-8") as handle:
+              handle.write(stamped)
+          print("stamped version as", tag)
+          PY
+          grep -n '^VERSION = ' gridwyrm.pyw
+
       - name: Run the tests
         run: python -m unittest discover -v
-        # A failing test stops the build, so a broken version never gets
+        # A failing test stops the build, so a broken version is never
         # published. tkinter ships with the runner's Python, so the module
         # imports normally here.
 
@@ -51,6 +100,8 @@ jobs:
           path: dist/Gridwyrm.exe
 
       - name: Attach it to the release
+        # True for both a published release and a tag push, and false for a
+        # manual run, which is what leaves the artifact as the only output.
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
