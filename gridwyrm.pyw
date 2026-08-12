@@ -1343,7 +1343,10 @@ def refresh_autostart_path():
 # The request carries no information about the user beyond what any HTTPS
 # request carries. It can be switched off, and it runs at most once a day.
 
-VERSION = "2.0"
+# Stamped from the release tag when the exe is built, so a packaged copy can
+# never disagree with the release it came from. This value is what a copy run
+# from source reports.
+VERSION = "2.1"
 UPDATE_API = "https://api.github.com/repos/LMMRZWG/Gridwyrm/releases/latest"
 RELEASES_PAGE = "https://github.com/LMMRZWG/Gridwyrm/releases/latest"
 UPDATE_INTERVAL_HOURS = 20

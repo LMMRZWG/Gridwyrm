@@ -911,6 +911,33 @@ class UpdateCheck(unittest.TestCase):
     def test_the_version_is_readable(self):
         self.assertIsNotNone(gridwyrm.parse_version(gridwyrm.VERSION))
 
+    def test_the_version_line_is_where_the_build_expects_it(self):
+        """The release workflow rewrites this line to match the tag.
+
+        It matches on a line starting with VERSION = "..." at the left margin.
+        Reformat or indent that line and stamping silently stops working, which
+        would leave every built exe insisting it is whichever version happened
+        to be committed. Hence a test rather than a comment.
+        """
+        import re
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "gridwyrm.pyw"), encoding="utf-8") as f:
+            source = f.read()
+        matches = re.findall(r'^VERSION = "[^"]*"', source, flags=re.M)
+        self.assertEqual(len(matches), 1)
+
+    def test_stamping_produces_a_readable_version(self):
+        """Simulates what the workflow does, for a few plausible tags."""
+        import re
+        for tag in ("2.1", "2.1.1", "3.0"):
+            with self.subTest(tag=tag):
+                stamped, count = re.subn(
+                    r'^VERSION = "[^"]*"', 'VERSION = "%s"' % tag,
+                    'VERSION = "0.0"\nother = 1\n', count=1, flags=re.M)
+                self.assertEqual(count, 1)
+                self.assertIn('VERSION = "%s"' % tag, stamped)
+                self.assertIsNotNone(gridwyrm.parse_version(tag))
+
 
 class TaskbarIcon(unittest.TestCase):
     """Tk reads the .ico itself and only understands classic DIB entries.
