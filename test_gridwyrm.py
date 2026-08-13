@@ -19,29 +19,69 @@ import shutil
 import tempfile
 import unittest
 
-# Gridwyrm ships as a single .pyw file. Windows happens to treat .pyw as an
-# importable source extension and other systems do not, so the module is loaded
-# by path rather than by name. That way the tests run the same everywhere.
-def _load_gridwyrm():
-    import importlib.util
-    here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, "gridwyrm.pyw")
-    if not os.path.exists(path):
-        raise unittest.SkipTest("gridwyrm.pyw is not next to the tests")
-    # An explicit loader is required: spec_from_file_location works from the
-    # extension, and .pyw is only a recognised source suffix on Windows.
-    import importlib.machinery
-    loader = importlib.machinery.SourceFileLoader("gridwyrm", path)
-    spec = importlib.util.spec_from_loader("gridwyrm", loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
+# The package is imported as a package. Every module here is free of screen
+# work, so none of this needs a display.
 try:
-    gridwyrm = _load_gridwyrm()
+    from gridwyrm.core import artwork
+    from gridwyrm.core import bands as bands_mod
+    from gridwyrm.core import conditions as conditions_mod
+    from gridwyrm.core import geometry
+    from gridwyrm.core import hotkeys as hotkeys_mod
+    from gridwyrm.core import measuring
+    from gridwyrm.core import storage
+    from gridwyrm.core import theme as theme_mod
+    from gridwyrm.core import updates
+    from gridwyrm.core import win32
 except ImportError as error:                     # pragma: no cover
-    raise unittest.SkipTest("cannot load gridwyrm.pyw: %s" % error)
+    raise unittest.SkipTest("cannot import gridwyrm: %s" % error)
+
+
+class _Facade:
+    """Reads a name from whichever core module owns it.
+
+    The tests were written against one flat module. Rather than rewrite four
+    hundred references, this looks the name up across the package, which keeps
+    the tests readable and means they say nothing about which file a function
+    happens to live in.
+    """
+
+    _modules = (geometry, measuring, theme_mod, bands_mod, conditions_mod,
+                hotkeys_mod, updates, storage, artwork, win32)
+
+    def __getattr__(self, name):
+        for module in self._modules:
+            if hasattr(module, name):
+                return getattr(module, name)
+        raise AttributeError(
+            "%s is in none of the core modules" % name)
+
+
+gridwyrm = _Facade()
+
+
+def _package_root():
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, "gridwyrm")
+
+
+def _read_module(relative):
+    """Read one module's source, for the few checks that are about the text."""
+    path = os.path.join(_package_root(), *relative.split("/"))
+    if not os.path.exists(path):
+        raise unittest.SkipTest("%s is not present" % relative)
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _read_package():
+    """Every module's source at once, for checks that span the package."""
+    joined = []
+    for folder, _dirs, files in os.walk(_package_root()):
+        for name in sorted(files):
+            if name.endswith(".py"):
+                with open(os.path.join(folder, name), encoding="utf-8") as f:
+                    joined.append(f.read())
+    return "\n".join(joined)
 
 
 class SquareGrid(unittest.TestCase):
@@ -439,7 +479,8 @@ class RangeBands(unittest.TestCase):
         text = "\n".join("B%d = %d" % (i, i + 1) for i in range(12))
         bands, error = gridwyrm.parse_bands(text)
         self.assertIsNone(bands)
-        self.assertIn("readable", error)
+        # The wording may change; the limit being named should not.
+        self.assertIn(str(gridwyrm.MAX_BANDS), error)
 
     def test_radii_convert_through_squares(self):
         """A 30ft band with 5ft squares and 64px cells is six squares out.
@@ -594,7 +635,7 @@ class BandEditor(unittest.TestCase):
         rows = [("B%d" % i, str(i + 1)) for i in range(gridwyrm.MAX_BANDS + 2)]
         bands, error = gridwyrm.validate_bands(rows)
         self.assertIsNone(bands)
-        self.assertIn("readable", error)
+        self.assertIn(str(gridwyrm.MAX_BANDS), error)
 
     def test_the_editor_and_the_saved_text_agree(self):
         """Rows are validated, then stored as text, so the two must round-trip."""
@@ -684,7 +725,7 @@ class Conditions(unittest.TestCase):
                 for i in range(gridwyrm.MAX_CONDITIONS + 2)]
         conditions, error = gridwyrm.validate_conditions(rows)
         self.assertIsNone(conditions)
-        self.assertIn("fits", error)
+        self.assertIn(str(gridwyrm.MAX_CONDITIONS), error)
 
     def test_the_saved_form_round_trips(self):
         conditions, _error = gridwyrm.validate_conditions(
@@ -773,6 +814,83 @@ class MarkerPlacement(unittest.TestCase):
         self.assertAlmostEqual(gx * cell + 20, 212, places=6)
 
 
+class Architecture(unittest.TestCase):
+    """Keeps the shape of the package from drifting back.
+
+    Gridwyrm was once a single file with a two-thousand-line class in it that
+    owned the interface, the hotkeys, the overlay, the colour picking, the theme
+    swapping and the settings all at once. These are the checks that stop that
+    happening again by accident, since nothing else would notice.
+    """
+
+    # Set to a little above where things actually stand, not to an ideal. The
+    # job of these numbers is to stop anything growing back, and a threshold
+    # that already fails teaches people to ignore the test. App is the largest
+    # of both at 718 lines in a 771-line module, and is the next thing to split.
+    LARGEST_CLASS = 750
+    LARGEST_MODULE = 800
+
+    def _modules(self):
+        root = _package_root()
+        for folder, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for name in sorted(files):
+                if name.endswith(".py"):
+                    path = os.path.join(folder, name)
+                    with open(path, encoding="utf-8") as handle:
+                        yield os.path.relpath(path, root), handle.read()
+
+    def test_no_class_grows_beyond_reading(self):
+        import ast
+        oversized = []
+        for name, source in self._modules():
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.ClassDef):
+                    size = node.end_lineno - node.lineno
+                    if size > self.LARGEST_CLASS:
+                        oversized.append("%s: %s is %d lines"
+                                         % (name, node.name, size))
+        self.assertEqual(oversized, [])
+
+    def test_no_module_grows_beyond_reading(self):
+        oversized = []
+        for name, source in self._modules():
+            lines = source.count("\n")
+            # artwork.py is embedded icon data rather than code, so it is
+            # allowed to be long: nobody reads it.
+            if lines > self.LARGEST_MODULE and not name.endswith("artwork.py"):
+                oversized.append("%s is %d lines" % (name, lines))
+        self.assertEqual(oversized, [])
+
+    def test_the_logic_layer_does_not_import_the_interface(self):
+        """core must not depend on ui or features, or it stops being testable."""
+        offenders = []
+        for name, source in self._modules():
+            if not name.startswith("core"):
+                continue
+            for line in source.splitlines():
+                if line.startswith(("from ..ui", "from ..features",
+                                    "from ..app")):
+                    offenders.append("%s: %s" % (name, line.strip()))
+        self.assertEqual(offenders, [])
+
+    def test_every_feature_takes_the_application_and_nothing_else(self):
+        import ast
+        for name, source in self._modules():
+            if not name.startswith("features") or name.endswith("__init__.py"):
+                continue
+            classes = [n for n in ast.parse(source).body
+                       if isinstance(n, ast.ClassDef)]
+            self.assertEqual(len(classes), 1, "%s should hold one class" % name)
+            init = next((m for m in classes[0].body
+                         if isinstance(m, ast.FunctionDef)
+                         and m.name == "__init__"), None)
+            self.assertIsNotNone(init, "%s has no __init__" % name)
+            args = [a.arg for a in init.args.args]
+            self.assertEqual(args, ["self", "app"],
+                             "%s takes %s" % (name, args))
+
+
 class PanelShortcuts(unittest.TestCase):
     """No shortcut may fire while someone is typing in a field.
 
@@ -784,9 +902,7 @@ class PanelShortcuts(unittest.TestCase):
     """
 
     def _source(self):
-        here = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(here, "gridwyrm.pyw"), encoding="utf-8") as f:
-            return f.read()
+        return _read_module("app.py")
 
     def test_no_bare_letter_is_bound_to_the_window(self):
         import re
@@ -800,7 +916,7 @@ class PanelShortcuts(unittest.TestCase):
         self.assertIn("ttk.Entry", bump)
 
     def test_the_footer_does_not_advertise_a_removed_shortcut(self):
-        source = self._source()
+        source = _read_package()
         self.assertNotIn("H show or hide", source)
         self.assertNotIn("Esc quit", source)
 
@@ -920,9 +1036,7 @@ class UpdateCheck(unittest.TestCase):
         to be committed. Hence a test rather than a comment.
         """
         import re
-        here = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(here, "gridwyrm.pyw"), encoding="utf-8") as f:
-            source = f.read()
+        source = _read_module("core/updates.py")
         matches = re.findall(r'^VERSION = "[^"]*"', source, flags=re.M)
         self.assertEqual(len(matches), 1)
 

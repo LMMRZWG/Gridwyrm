@@ -1,12 +1,12 @@
 @echo off
 REM ==========================================================================
-REM  Builds gridwyrm.pyw into a single standalone Gridwyrm.exe
+REM  Builds Gridwyrm.pyw into a single standalone Gridwyrm.exe
 REM
 REM  You normally do NOT need this. Publishing a release on GitHub builds the
 REM  exe automatically on a Windows runner and attaches it to that release.
 REM  Use this only when you want a build on your own machine straight away.
 REM
-REM  Put it beside gridwyrm.pyw and icon.ico, then double-click it.
+REM  Put it beside Gridwyrm.pyw and icon.ico, then double-click it.
 REM ==========================================================================
 
 title Build Gridwyrm
@@ -17,7 +17,7 @@ echo  Building Gridwyrm.exe
 echo  ---------------------
 echo.
 
-if not exist gridwyrm.pyw goto nosource
+if not exist Gridwyrm.pyw goto nosource
 
 where python >nul 2>&1
 if errorlevel 1 goto nopython
@@ -40,7 +40,7 @@ if exist icon.ico set ICONOPT=--icon icon.ico
 if exist icon.ico (echo        using icon.ico) else (echo        no icon.ico found, building without one)
 
 echo  [3/4] Packaging...
-python -m PyInstaller --onefile --windowed --noupx --clean --noconfirm --name Gridwyrm %ICONOPT% gridwyrm.pyw
+python -m PyInstaller --onefile --windowed --noupx --clean --noconfirm --name Gridwyrm %ICONOPT% Gridwyrm.pyw
 if errorlevel 1 goto failed
 
 echo  [4/4] Tidying up...
@@ -64,7 +64,7 @@ pause
 exit /b 0
 
 :nosource
-echo  gridwyrm.pyw was not found in this folder.
+echo  Gridwyrm.pyw was not found in this folder.
 echo  Put this .bat next to it and try again.
 echo.
 pause
