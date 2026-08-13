@@ -44,13 +44,15 @@ jobs:
         run: |
           # Failing here with a plain message beats a confusing PyInstaller
           # error twenty lines deep.
-          for needed in gridwyrm.pyw icon.ico test_gridwyrm.py; do
+          for needed in Gridwyrm.pyw icon.ico test_gridwyrm.py \
+                        gridwyrm/__init__.py gridwyrm/app.py \
+                        gridwyrm/core/updates.py; do
             if [ ! -f "$needed" ]; then
               echo "::error::$needed is missing from the repository"
               exit 1
             fi
           done
-          echo "gridwyrm.pyw, icon.ico and test_gridwyrm.py are all here"
+          echo "the launcher, the package and the icon are all present"
 
       - name: Stamp the version from the tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -65,7 +67,7 @@ jobs:
           import sys
 
           tag = sys.argv[1]
-          path = "gridwyrm.pyw"
+          path = "gridwyrm/core/updates.py"
           with open(path, encoding="utf-8") as handle:
               source = handle.read()
           stamped, count = re.subn(r'^VERSION = "[^"]*"',
@@ -77,7 +79,7 @@ jobs:
               handle.write(stamped)
           print("stamped version as", tag)
           PY
-          grep -n '^VERSION = ' gridwyrm.pyw
+          grep -n '^VERSION = ' gridwyrm/core/updates.py
 
       - name: Run the tests
         run: python -m unittest discover -v
@@ -91,7 +93,7 @@ jobs:
       - name: Build Gridwyrm.exe
         run: >
           pyinstaller --onefile --windowed --noupx --clean --noconfirm
-          --name Gridwyrm --icon icon.ico gridwyrm.pyw
+          --name Gridwyrm --icon icon.ico Gridwyrm.pyw
 
       - name: Keep the exe even without a tag
         uses: actions/upload-artifact@v4
