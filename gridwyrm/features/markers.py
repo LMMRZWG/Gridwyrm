@@ -28,7 +28,7 @@ class Markers:
             "conditions",
             "Click each creature that is %s     right-click when done" % name,
             self._condition_click, self._condition_move,
-            getattr(self, "condition_button", None), label="Done")
+            getattr(self.app, "condition_button", None), label="Done")
         log_event("conditions: placing %s" % name)
 
     def _grid_from_pixels(self, x, y):

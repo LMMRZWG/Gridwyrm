@@ -44,7 +44,7 @@ class Preview:
             return
         self.app.preview_image_path = path
         self.app._photo_key = None
-        self.app._map_size = None                    # force the backdrop to rebuild
+        self.map_size = None                    # force the backdrop to rebuild
         self._update_backdrop_label()
         self.app.schedule_draw()
 
@@ -52,7 +52,7 @@ class Preview:
         self.app.preview_image_path = ""
         self.app.preview_photo = None
         self.app._photo_key = None
-        self.app._map_size = None
+        self.map_size = None
         self._update_backdrop_label()
         self.app.schedule_draw()
 
@@ -230,10 +230,10 @@ class Preview:
             return
 
         # The map is static, so rebuild it only when the canvas changes size.
-        if getattr(self, "_map_size", None) != (w, h):
+        if self.map_size != (w, h):
             c.delete("map")
             self._paint_sample_map(c, w, h)
-            self.app._map_size = (w, h)
+            self.map_size = (w, h)
 
         c.delete("grid")
         c.delete("chip")

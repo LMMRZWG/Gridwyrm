@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from ...core import theme
+from ..placement import centre_on
 from ...core.theme import blend
 from ...core.win32 import set_frame_mode
 from .bands import BandsTab
@@ -195,16 +196,7 @@ class SettingsWindow:
             pass
 
     def _centre_on_parent(self):
-        # winfo_width is 1 until a window is mapped, so the requested size is
-        # what to centre against while it is still hidden.
-        try:
-            parent = self.app.root
-            width = max(self.win.winfo_reqwidth(), self.win.winfo_width())
-            x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
-            y = parent.winfo_rooty() + self.app.ui.px(40)
-            self.win.geometry("+%d+%d" % (max(0, x), max(0, y)))
-        except tk.TclError:
-            pass
+        centre_on(self.win, self.app.root, self.app.ui.px(40))
 
     def close(self):
         self.app.settings_window = None

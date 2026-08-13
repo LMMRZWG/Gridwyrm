@@ -129,32 +129,60 @@ def download_release_asset(url, destination, expected_size=0, timeout=120.0):
     return size
 
 
-def swap_script(current, incoming, backup, pid):
-    """A batch file that replaces the program once this copy has exited.
+def swap_script(current, incoming, backup, pid=0):
+    """A batch file that replaces the program once this copy has let go of it.
 
-    Windows will not let a running executable overwrite itself, so the swap has
-    to outlive the process doing it. The old copy is kept as a backup and put
-    straight back if the replacement fails, so a bad moment cannot leave someone
-    with nothing that runs.
+    Windows will not let a running executable be overwritten, so the swap has to
+    outlive the process doing it.
+
+    The readiness test is the move itself, retried until it succeeds. An earlier
+    version waited for a process id to disappear, which was the wrong test twice
+    over: a one-file build runs as a child of a bootloader that also holds the
+    image open, and an antivirus scanner can keep the file locked for a second or
+    two after everything has exited. Whether the file can be moved is the only
+    question that actually matters, so it asks that.
+
+    The old copy is kept and put straight back if the replacement fails, so a bad
+    moment cannot leave someone with nothing that runs. What happened is written
+    to a log beside the program, because none of this is visible while it works.
     """
     return "\r\n".join([
         "@echo off",
         "rem Written by Gridwyrm to finish an update. Safe to delete.",
+        'set "CUR=%s"' % current,
+        'set "NEW=%s"' % incoming,
+        'set "OLD=%s"' % backup,
+        # %~dp0 is the folder holding this script, which is the folder
+        # holding the program. Working it out here rather than in Python
+        # keeps it correct regardless of what built the path.
+        'set "LOG=%~dp0gridwyrm-update.log"',
+        'echo Gridwyrm update started %DATE% %TIME%> "%LOG%"',
+        'if exist "%OLD%" del /q "%OLD%" 2>nul',
+        "set /a tries=0",
         ":wait",
-        'tasklist /fi "PID eq %d" 2>nul | find "%d" >nul' % (pid, pid),
-        "if not errorlevel 1 (",
-        "  ping -n 2 127.0.0.1 >nul",
-        "  goto wait",
+        "set /a tries+=1",
+        'if %tries% GTR 120 goto giveup',
+        "ping -n 2 127.0.0.1 >nul",
+        'move /y "%CUR%" "%OLD%" >nul 2>&1',
+        'if exist "%CUR%" goto wait',
+        'echo moved the old copy aside after %tries% tries>> "%LOG%"',
+        'move /y "%NEW%" "%CUR%" >nul 2>&1',
+        'if not exist "%CUR%" (',
+        '  echo replacement failed, putting the old copy back>> "%LOG%"',
+        '  move /y "%OLD%" "%CUR%" >nul 2>&1',
         ")",
-        'if exist "%s" del /q "%s"' % (backup, backup),
-        'move /y "%s" "%s" >nul' % (current, backup),
-        'move /y "%s" "%s" >nul' % (incoming, current),
-        'if not exist "%s" move /y "%s" "%s" >nul' % (current, backup, current),
-        'start "" "%s"' % current,
-        'del /q "%~f0"',
+        'echo starting %CUR%>> "%LOG%"',
+        'start "" "%CUR%"',
+        'if exist "%NEW%" del /q "%NEW%" 2>nul',
+        "goto done",
+        ":giveup",
+        'echo gave up waiting for the old copy to be released>> "%LOG%"',
+        'start "" "%CUR%"',
+        ":done",
+        # Deleting the script while it runs needs this dance, or cmd complains.
+        '(goto) 2>nul & del /q "%~f0"',
         "",
     ])
-
 
 def update_check_due(last_checked, now=None, hours=UPDATE_INTERVAL_HOURS):
     """Whether enough time has passed. Also guards against a clock that moved."""

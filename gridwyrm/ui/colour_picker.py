@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from ..core import theme
+from .placement import centre_on
 from ..core.theme import HEX_RE, hex_to_rgb, rgb_to_hex
 from ..core.win32 import set_frame_mode
 
@@ -255,14 +256,7 @@ class ColourPicker:
     # -- window ------------------------------------------------------------
 
     def _centre_on(self, parent):
-        try:
-            self.win.update_idletasks()
-            width = max(self.win.winfo_reqwidth(), self.win.winfo_width())
-            x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
-            y = parent.winfo_rooty() + self.app.ui.px(50)
-            self.win.geometry("+%d+%d" % (max(0, x), max(0, y)))
-        except tk.TclError:
-            pass
+        centre_on(self.win, parent, self.app.ui.px(50))
 
     def choose(self):
         self.result = self.current_hex().upper()

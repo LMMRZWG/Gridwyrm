@@ -42,7 +42,7 @@ class Ranges:
             "Click the creature to centre the bands on"
             "     right-click to cancel",
             self._range_click, self._range_move,
-            getattr(self, "range_button", None))
+            getattr(self.app, "range_button", None))
         self.app.range_readout.set("Click a point on the map")
         log_event("ranges: placing")
 
@@ -182,7 +182,8 @@ class Ranges:
             for name, distance in self.app.bands))
 
     def pick_band_colour(self):
-        chosen = ColourPicker(self, self.app.root, self.app.band_colour.get(),
+        chosen = ColourPicker(self.app, self.app.root,
+                              self.app.band_colour.get(),
                               "Range band colour").show()
         if chosen:
             self.app.band_colour.set(chosen)

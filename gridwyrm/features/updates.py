@@ -37,6 +37,27 @@ class Updates:
         self.pending = ""
         self.state = "idle"
 
+    def tidy_leftovers(self):
+        """Clear the debris of an update that did not finish.
+
+        If we are running, either the swap succeeded or it never happened. Either
+        way a downloaded copy and a half-run script are no longer wanted, and
+        leaving them makes it look as though something is still in progress.
+        """
+        if not getattr(sys, "frozen", False):
+            return
+        folder = os.path.dirname(os.path.abspath(sys.executable))
+        for name in ("Gridwyrm.update.exe", "gridwyrm-update.bat"):
+            path = os.path.join(folder, name)
+            if not os.path.exists(path):
+                continue
+            try:
+                os.remove(path)
+                log_event("cleared leftover %s" % name)
+            except Exception:
+                # Still locked, or not ours to delete. Not worth complaining.
+                pass
+
     def check_for_update(self, manual=False):
         """Ask GitHub whether there is a newer release.
 
@@ -201,7 +222,7 @@ class Updates:
 
     def install_update(self):
         """Hand the swap to a script that outlives this process, then quit."""
-        incoming = getattr(self, "pending_update", "")
+        incoming = self.pending
         if not incoming or not os.path.exists(incoming):
             self.state = "idle"
             self.app.update_action.set("Open page")
@@ -217,9 +238,13 @@ class Updates:
             # what it gets. A folder with an accent in its name would fail to
             # encode as plain ASCII.
             with open(script, "w", encoding="mbcs", errors="strict") as handle:
-                handle.write(swap_script(current, incoming, backup,
-                                         os.getpid()))
-            creation = 0x00000008 | 0x08000000        # detached, no window
+                handle.write(swap_script(current, incoming, backup))
+            # CREATE_NO_WINDOW only. Windows documents CREATE_NO_WINDOW,
+            # DETACHED_PROCESS and CREATE_NEW_CONSOLE as mutually exclusive, and
+            # rejects the call outright if more than one is given. Combining the
+            # first two is why an update used to leave its files behind and
+            # never restart: the call failed, and the failure was swallowed.
+            creation = 0x08000000
             subprocess.Popen(["cmd", "/c", script], close_fds=True,
                              creationflags=creation, cwd=folder)
         except Exception as error:                    # noqa: BLE001

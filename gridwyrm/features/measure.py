@@ -22,6 +22,17 @@ class Measure:
         self.state = None               # the span in progress, or None
         self.span = None
 
+    def forget_span(self):
+        """Clear the span in progress, however the mouse came back.
+
+        Called by the application when the overlay releases the pointer, which
+        covers all of it: a finished measurement, a right-click, the panel
+        button, and the timeout. Without this the span outlives the session and
+        the next press of Measure believes one is already running, so it cancels
+        instead of starting.
+        """
+        self.state = None
+
     def toggle_measure(self):
         if self.state is not None:
             self.cancel_measure("Measuring cancelled")
@@ -36,7 +47,7 @@ class Measure:
             "Click two points to measure     hold Shift to keep it straight"
             "     right-click to cancel",
             self._measure_click, self._measure_move,
-            getattr(self, "measure_button", None))
+            getattr(self.app, "measure_button", None))
         self.app.span_row.pack_forget()
         self.app.measure_readout.set("Click the first point on the map")
         self.app.status.set("Measuring")

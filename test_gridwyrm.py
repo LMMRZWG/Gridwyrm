@@ -994,20 +994,41 @@ class UpdateCheck(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertFalse(gridwyrm.download_is_trusted(url))
 
-    def test_the_swap_script_waits_before_replacing_anything(self):
-        script = gridwyrm.swap_script("C:\\g\\Gridwyrm.exe",
-                                      "C:\\g\\Gridwyrm.update.exe",
-                                      "C:\\g\\Gridwyrm.previous.exe", 4321)
-        self.assertIn("tasklist", script)
-        self.assertIn("4321", script)
-        # The wait has to come before the move, or it replaces a running file.
-        self.assertLess(script.index("tasklist"), script.index("move /y"))
+    def _script(self):
+        return gridwyrm.swap_script("C:\\g\\Gridwyrm.exe",
+                                    "C:\\g\\Gridwyrm.update.exe",
+                                    "C:\\g\\Gridwyrm.previous.exe")
+
+    def test_the_readiness_test_is_the_move_itself(self):
+        """Asking whether the file can be moved is the only question that counts.
+
+        An earlier version waited for a process id to vanish, which was wrong
+        twice: a one-file build runs beneath a bootloader that also holds the
+        image open, and a scanner can keep it locked afterwards.
+        """
+        script = self._script()
+        self.assertNotIn("tasklist", script)
+        self.assertIn("move /y", script)
+        self.assertIn("goto wait", script)
+
+    def test_the_wait_gives_up_rather_than_looping_for_ever(self):
+        script = self._script()
+        self.assertIn("tries", script)
+        self.assertIn("giveup", script)
+
+    def test_the_swap_script_always_starts_something(self):
+        """Whether it succeeds or gives up, the user must end up with a program."""
+        script = self._script()
+        self.assertEqual(script.count('start "" "%CUR%"'), 2)
+
+    def test_the_swap_script_writes_a_log(self):
+        """None of this is visible while it works, so it has to leave a record."""
+        script = self._script()
+        self.assertIn("%~dp0gridwyrm-update.log", script)
 
     def test_the_swap_script_can_put_the_old_copy_back(self):
         """A failed move must not leave someone with nothing that runs."""
-        script = gridwyrm.swap_script("C:\\g\\Gridwyrm.exe",
-                                      "C:\\g\\Gridwyrm.update.exe",
-                                      "C:\\g\\Gridwyrm.previous.exe", 1)
+        script = self._script()
         self.assertIn("Gridwyrm.previous.exe", script)
         self.assertIn("if not exist", script)
         self.assertIn("start ", script)
@@ -1015,7 +1036,7 @@ class UpdateCheck(unittest.TestCase):
 
     def test_the_swap_script_uses_windows_line_endings(self):
         """A batch file with bare newlines misbehaves on some setups."""
-        script = gridwyrm.swap_script("a", "b", "c", 1)
+        script = gridwyrm.swap_script("a", "b", "c")
         self.assertIn("\r\n", script)
 
     def test_the_urls_point_at_this_repository(self):

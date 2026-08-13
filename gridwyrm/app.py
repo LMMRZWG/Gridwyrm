@@ -61,6 +61,8 @@ class App:
         # Before any window exists, or the taskbar groups this under whatever
         # launched it and shows that program's icon.
         claim_taskbar_identity()
+        # Held for the life of the process on purpose: faulthandler writes
+        # to this file object, and closing it would silence native crashes.
         self._fault_log = enable_fault_log()
         log_event("---- start  pid=%s  frozen=%s  python=%s"
                   % (os.getpid(), bool(getattr(sys, "frozen", False)),
@@ -182,7 +184,6 @@ class App:
         self._draw_handle = None
         self.ui._wrap_labels = []
         self.ui._value_rows = []
-        self._narrow = None
         self.hotkeys = normalise_hotkeys(saved.get("hotkeys", {}),
                                          saved.get("hotkeys_version", 0))
         self.hotkey_manager = HotkeyManager(self.root)
@@ -219,6 +220,10 @@ class App:
         self._register_hotkeys(announce=True)
         self.hotkey_manager.start_polling()
         self._hold_top()
+
+        # Anything left over from a previous attempt goes first, so it cannot
+        # be mistaken for an update still in progress.
+        self.updater.tidy_leftovers()
 
         # A previously seen update is announced straight away. Waiting on the
         # network for something already known would mean saying nothing at all
@@ -295,7 +300,7 @@ class App:
 
     def _pointer_released(self):
         """Put the panel back the way it was. The mouse is already returned."""
-        self.measure = None
+        self.measure_feature.forget_span()
         self.placing_ranges = False
         self.placing_condition = False
         self.apply_opacity()
@@ -391,6 +396,8 @@ class App:
             images = [tk.PhotoImage(data=blob) for blob in
                       (ICON_PNG_64, ICON_PNG_32, ICON_PNG_16)]
             # Tk discards images it holds no reference to, so keep them.
+            # Kept referenced on purpose. Tk discards images nothing holds,
+            # and the icon would vanish with them.
             self._icon_images = images
             # True makes it the default for the settings and picker windows too.
             self.root.iconphoto(True, *images)
@@ -548,7 +555,7 @@ class App:
         self.lamp.configure(bg=theme.INK)
         self.viewport.configure(bg=theme.INK)
         self.preview.configure(bg=theme.INK, highlightbackground=theme.LINE)
-        self._map_size = None                    # chip colours follow the theme
+        self.preview_painter.map_size = None                    # chip colours follow the theme
         for strip in self.ui._swatch_strips:
             strip["canvas"].configure(bg=theme.PANEL)
         set_frame_mode(self.root)
